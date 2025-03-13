@@ -139,6 +139,7 @@ function calculatePercent(taskData) {
   return taskData.percent || 0;
 }
 
+
 async function processNextQueue() {
   if (isProcessing) return;
   const nextTask = await MongoDB.getNextQueuedTask();
