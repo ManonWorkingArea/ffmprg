@@ -62,7 +62,8 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     status: 'queued',
     quality,
     createdAt: Date.now(),
-    outputFile: null
+    outputFile: null,
+    type: 'convert'
   };
 
   if (req.file) {
@@ -78,23 +79,35 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     return res.status(400).json({ success: false, error: 'Video file or URL required' });
   }
 
-  await redisClient.set(taskId, JSON.stringify(taskData));
+  const redisKey = `convert:${taskId}`;
+  await redisClient.set(redisKey, JSON.stringify(taskData));
 
-  processQueue(taskId, taskData);
+  processQueue(redisKey, taskData);
 
   res.json({ success: true, taskId });
 });
 
 // Endpoint: Get all tasks in processing or on hold
 app.get('/tasks', async (req, res) => {
-  const keys = await redisClient.keys('*');
-  const tasks = await Promise.all(keys.map(async (key) => {
-    const task = await redisClient.get(key);
-    return JSON.parse(task);
-  }));
+  const stream = redisClient.scanStream({
+    match: 'convert:*',
+    count: 100
+  });
 
-  const filteredTasks = tasks.filter(task => task.status === 'processing' || task.status === 'queued');
-  res.json({ success: true, tasks: filteredTasks });
+  const tasks = [];
+
+  stream.on('data', async (keys) => {
+    const taskPromises = keys.map(async (key) => {
+      const task = await redisClient.get(key);
+      return JSON.parse(task);
+    });
+    tasks.push(...await Promise.all(taskPromises));
+  });
+
+  stream.on('end', () => {
+    const filteredTasks = tasks.filter(task => task && (task.status === 'processing' || task.status === 'queued'));
+    res.json({ success: true, tasks: filteredTasks });
+  });
 });
 
 // Endpoint: Check status and get result
@@ -151,7 +164,7 @@ async function processQueue(taskId, taskData) {
       redisClient.set(taskId, JSON.stringify({
         ...taskData,
         status: 'processing',
-        percent // บันทึกเปอร์เซ็นต์ใน Redis
+        percent
       }));
     })
     .on('end', async () => {
