@@ -23,6 +23,8 @@ const redisClient = createClient({
   url: 'redis://default:e3PHPsEo92tMA5mNmWmgV8O6cn4tlblB@redis-19867.fcrce171.ap-south-1-1.ec2.redns.redis-cloud.com:19867'
 });
 
+let isConnected = false;
+
 redisClient.on('error', (err) => {
   console.error('Redis Client Error', err);
   // Attempt to reconnect if the socket is closed unexpectedly
@@ -32,18 +34,25 @@ redisClient.on('error', (err) => {
 });
 
 async function reconnect() {
+  if (isConnected) return; // Prevent multiple reconnect attempts
+  isConnected = true;
+
   try {
     await redisClient.connect();
     console.log('Redis reconnected');
   } catch (error) {
     console.error('Failed to reconnect to Redis:', error);
-    setTimeout(reconnect, 5000); // Retry after 5 seconds
+    setTimeout(() => {
+      isConnected = false; // Reset connection status before retrying
+      reconnect();
+    }, 5000); // Retry after 5 seconds
   }
 }
 
 (async () => {
   try {
     await redisClient.connect();
+    isConnected = true; // Set connection status to true
     console.log('Redis connected');
   } catch (error) {
     console.error('Failed to connect to Redis:', error);
