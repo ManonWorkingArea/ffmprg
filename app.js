@@ -62,54 +62,22 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     status: 'queued',
     quality,
     createdAt: Date.now(),
-    outputFile: null,
-    type: 'convert'
+    outputFile: null
   };
 
   if (req.file) {
     taskData.inputPath = req.file.path;
   } else if (req.body.url) {
-    const existingTask = await redisClient.get(req.body.url);
-    if (existingTask) {
-      const existingTaskData = JSON.parse(existingTask);
-      return res.json({ success: true, taskId: existingTaskData.taskId, status: existingTaskData.status });
-    }
     taskData.url = req.body.url;
   } else {
     return res.status(400).json({ success: false, error: 'Video file or URL required' });
   }
 
-  const redisKey = `convert:${taskId}`;
-  await redisClient.set(redisKey, JSON.stringify(taskData));
+  await redisClient.set(taskId, JSON.stringify(taskData));
 
-  processQueue(redisKey, taskData);
+  processQueue(taskId, taskData);
 
   res.json({ success: true, taskId });
-});
-
-// Endpoint: Get all tasks in processing or on hold
-app.get('/tasks', async (req, res) => {
-  const tasks = [];
-  let cursor = '0';
-
-  do {
-    // ใช้ scan แทน scanStream
-    const reply = await redisClient.scan(cursor, {
-      MATCH: 'convert:*', // ค้นหาคีย์ที่มีรูปแบบเฉพาะ
-      COUNT: 100 // จำนวนคีย์ที่ดึงในแต่ละครั้ง
-    });
-    cursor = reply[0]; // อัปเดต cursor สำหรับการวนรอบถัดไป
-    const keys = reply[1];
-
-    const taskPromises = keys.map(async (key) => {
-      const task = await redisClient.get(key);
-      return JSON.parse(task);
-    });
-    tasks.push(...await Promise.all(taskPromises));
-  } while (cursor !== '0'); // ทำซ้ำจนกว่าจะไม่มีคีย์เพิ่มเติม
-
-  const filteredTasks = tasks.filter(task => task && (task.status === 'processing' || task.status === 'queued'));
-  res.json({ success: true, tasks: filteredTasks });
 });
 
 // Endpoint: Check status and get result
@@ -166,7 +134,7 @@ async function processQueue(taskId, taskData) {
       redisClient.set(taskId, JSON.stringify({
         ...taskData,
         status: 'processing',
-        percent
+        percent // บันทึกเปอร์เซ็นต์ใน Redis
       }));
     })
     .on('end', async () => {
