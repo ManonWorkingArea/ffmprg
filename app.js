@@ -68,6 +68,11 @@ app.post('/convert', upload.single('video'), async (req, res) => {
   if (req.file) {
     taskData.inputPath = req.file.path;
   } else if (req.body.url) {
+    const existingTask = await redisClient.get(req.body.url);
+    if (existingTask) {
+      const existingTaskData = JSON.parse(existingTask);
+      return res.json({ success: true, taskId: existingTaskData.taskId, status: existingTaskData.status });
+    }
     taskData.url = req.body.url;
   } else {
     return res.status(400).json({ success: false, error: 'Video file or URL required' });
@@ -78,6 +83,18 @@ app.post('/convert', upload.single('video'), async (req, res) => {
   processQueue(taskId, taskData);
 
   res.json({ success: true, taskId });
+});
+
+// Endpoint: Get all tasks in processing or on hold
+app.get('/tasks', async (req, res) => {
+  const keys = await redisClient.keys('*');
+  const tasks = await Promise.all(keys.map(async (key) => {
+    const task = await redisClient.get(key);
+    return JSON.parse(task);
+  }));
+
+  const filteredTasks = tasks.filter(task => task.status === 'processing' || task.status === 'queued');
+  res.json({ success: true, tasks: filteredTasks });
 });
 
 // Endpoint: Check status and get result
