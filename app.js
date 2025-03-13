@@ -7,6 +7,7 @@ const { createClient } = require('redis');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 const fs = require('fs'); 
+const redis = require('redis');
 
 const app = express();
 const port = process.env.PORT || 6000;
@@ -18,45 +19,37 @@ app.use(express.static('outputs'));
 
 const upload = multer({ dest: 'uploads/' });
 
-// Connect to Redis Cloud
-const redisClient = createClient({
-  url: 'redis://default:e3PHPsEo92tMA5mNmWmgV8O6cn4tlblB@redis-19867.fcrce171.ap-south-1-1.ec2.redns.redis-cloud.com:19867'
+// Redis Client Setup
+const redisClient = redis.createClient({
+  url: 'redis://default:e3PHPsEo92tMA5mNmWmgV8O6cn4tlblB@redis-19867.fcrce171.ap-south-1-1.ec2.redns.redis-cloud.com:19867',
+  socket: {
+    tls: true,
+    connectTimeout: 10000,
+    keepAlive: 5000,
+    reconnectStrategy: (retries) => {
+      const delay = Math.min(50 * 2 ** retries + Math.random() * 100, 3000);
+      console.warn(`Reconnecting to Redis... Attempt ${retries}, retrying in ${delay}ms`);
+      return delay;
+    }
+  }
 });
 
-let isConnected = false;
-
+// Event Listeners
+redisClient.on('connect', () => console.log('RED :: Connected.'));
+redisClient.on('ready', () => console.log('RED :: Ready.'));
 redisClient.on('error', (err) => {
-  console.error('Redis Client Error', err);
-  // Attempt to reconnect if the socket is closed unexpectedly
-  if (err.message.includes('Socket closed unexpectedly')) {
-    reconnect();
-  }
+  console.error('RED :: Error:', err);
+  // เพิ่มการจัดการข้อผิดพลาดเพิ่มเติมที่นี่
 });
+redisClient.on('end', () => console.warn('RED :: Closed.'));
+redisClient.on('reconnecting', () => console.warn('RED :: Reconnecting...'));
 
-async function reconnect() {
-  if (isConnected) return; // Prevent multiple reconnect attempts
-  isConnected = true;
-
-  try {
-    await redisClient.connect();
-    console.log('Redis reconnected');
-    isConnected = true; // Update connection status
-  } catch (error) {
-    console.error('Failed to reconnect to Redis:', error);
-    setTimeout(() => {
-      isConnected = false; // Reset connection status before retrying
-      reconnect();
-    }, 5000); // Retry after 5 seconds
-  }
-}
-
+// Connect to Redis
 (async () => {
   try {
     await redisClient.connect();
-    isConnected = true; // Set connection status to true
-    console.log('Redis connected');
-  } catch (error) {
-    console.error('Failed to connect to Redis:', error);
+  } catch (err) {
+    console.error('Failed to connect to Redis:', err);
   }
 })();
 
