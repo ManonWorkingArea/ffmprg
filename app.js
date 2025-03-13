@@ -91,7 +91,6 @@ app.get('/status/:taskId', async (req, res) => {
   if (!task) {
     return res.status(404).json({ success: false, error: 'Task not found' });
   }
-
   const response = {
     success: true,
     task,
