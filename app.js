@@ -38,14 +38,19 @@ app.post('/convert', upload.single('video'), (req, res) => {
   }
 
   ffmpeg(inputPath)
-    .outputOptions('-c:v libx264', '-preset fast', '-crf 22', `-s ${videoSize}`)
-    .on('end', () => {
-      res.json({ success: true, url: `/${outputFileName}` });
-    })
-    .on('error', (err) => {
-      res.status(500).json({ success: false, error: err.message });
-    })
-    .save(outputPath);
+  .videoCodec('libx264')
+  .outputOptions([
+    '-preset', 'fast',
+    '-crf', '22'
+  ])
+  .on('end', () => {
+    res.json({ success: true, url: `/${outputFileName}` });
+  })
+  .on('error', (err) => {
+    res.status(500).json({ success: false, error: err.message });
+  })
+  .save(outputPath);
+
 });
 
 app.listen(port, () => {
