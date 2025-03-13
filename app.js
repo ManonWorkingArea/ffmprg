@@ -44,6 +44,7 @@ const taskSchema = new mongoose.Schema({
 const Task = mongoose.model('Queue', taskSchema);
 
 let ffmpegProcesses = {}; // เก็บข้อมูลเกี่ยวกับกระบวนการ ffmpeg
+let isProcessing = false; // ตัวแปรเพื่อบอกสถานะการประมวลผล
 
 // Endpoint: Add conversion task to queue
 app.post('/convert', upload.single('video'), async (req, res) => {
@@ -82,7 +83,7 @@ app.post('/convert', upload.single('video'), async (req, res) => {
 
   processQueue(taskId, taskData);
 
-  res.json({ success: true, taskId });
+  res.json({ success: true, taskId, downloadLink: `/outputs/${taskId}-output.mp4` }); // ส่งลิงก์ดาวน์โหลด
 });
 
 // Endpoint: Check status and get result
@@ -93,10 +94,12 @@ app.get('/status/:taskId', async (req, res) => {
   if (!task) {
     return res.status(404).json({ success: false, error: 'Task not found' });
   }
+  
   const response = {
     success: true,
     task,
-    percent: task.status === 'processing' ? calculatePercent(task) : 100 // คำนวณเปอร์เซ็นต์ถ้ากำลังประมวลผล
+    percent: task.status === 'processing' ? calculatePercent(task) : 100, // คำนวณเปอร์เซ็นต์ถ้ากำลังประมวลผล
+    downloadLink: task.status === 'completed' ? `/outputs/${taskId}-output.mp4` : null // ส่งลิงก์ดาวน์โหลดถ้าสถานะเป็น 'completed'
   };
 
   res.json(response);
@@ -172,12 +175,13 @@ async function processQueue(taskId, taskData) {
       delete ffmpegProcesses[taskId]; // ลบกระบวนการเมื่อเสร็จสิ้น
       await Task.updateOne({ taskId }, { status: 'completed', outputFile: `/${outputFileName}` });
       fs.unlink(inputPath, () => {});
-      processNextQueue();
+      processNextQueue(); // เรียกใช้ processNextQueue เพื่อประมวลผลงานถัดไป
     })
     .on('error', async (err) => {
       delete ffmpegProcesses[taskId]; // ลบกระบวนการเมื่อเกิดข้อผิดพลาด
       await Task.updateOne({ taskId }, { status: 'error', error: err.message });
       fs.unlink(inputPath, () => {});
+      processNextQueue(); // เรียกใช้ processNextQueue เพื่อประมวลผลงานถัดไป
     })
     .save(outputPath);
 }
@@ -189,9 +193,13 @@ function calculatePercent(taskData) {
 
 // ฟังก์ชันใหม่สำหรับจัดการคิวถัดไป
 async function processNextQueue() {
+  if (isProcessing) return; // ถ้ากำลังประมวลผลอยู่ ให้หยุด
   const nextTask = await Task.findOneAndDelete({ status: 'queued' }); // ดึง task ถัดไปจาก MongoDB
   if (nextTask) {
-    processQueue(nextTask.taskId, nextTask); // เรียกใช้ processQueue สำหรับ task ถัดไป
+    isProcessing = true; // ตั้งค่าสถานะการประมวลผล
+    await processQueue(nextTask.taskId, nextTask); // เรียกใช้ processQueue สำหรับ task ถัดไป
+    isProcessing = false; // รีเซ็ตสถานะการประมวลผล
+    processNextQueue(); // เรียกใช้ processNextQueue เพื่อประมวลผลงานถัดไป
   }
 }
 
