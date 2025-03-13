@@ -89,7 +89,14 @@ app.get('/status/:taskId', async (req, res) => {
     return res.status(404).json({ success: false, error: 'Task not found' });
   }
 
-  res.json({ success: true, task: JSON.parse(task) });
+  const taskData = JSON.parse(task);
+  const response = {
+    success: true,
+    task: taskData,
+    percent: taskData.status === 'processing' ? calculatePercent(taskData) : 100 // คำนวณเปอร์เซ็นต์ถ้ากำลังประมวลผล
+  };
+
+  res.json(response);
 });
 
 // Processing function
@@ -122,6 +129,14 @@ async function processQueue(taskId, taskData) {
     .size(videoSize)
     .videoCodec('libx264')
     .outputOptions(['-preset', 'fast', '-crf', '22'])
+    .on('progress', (progress) => {
+      const percent = Math.round(progress.percent);
+      redisClient.set(taskId, JSON.stringify({
+        ...taskData,
+        status: 'processing',
+        percent // บันทึกเปอร์เซ็นต์ใน Redis
+      }));
+    })
     .on('end', async () => {
       await redisClient.set(taskId, JSON.stringify({
         ...taskData,
@@ -140,6 +155,11 @@ async function processQueue(taskId, taskData) {
       fs.unlink(inputPath, () => {});
     })
     .save(outputPath);
+}
+
+// ฟังก์ชันคำนวณเปอร์เซ็นต์
+function calculatePercent(taskData) {
+  return taskData.percent || 0; // คืนค่าเปอร์เซ็นต์จากข้อมูลที่บันทึกไว้
 }
 
 app.listen(port, () => {
