@@ -43,6 +43,8 @@ const taskSchema = new mongoose.Schema({
 
 const Task = mongoose.model('Queue', taskSchema);
 
+let ffmpegProcesses = {}; // เก็บข้อมูลเกี่ยวกับกระบวนการ ffmpeg
+
 // Endpoint: Add conversion task to queue
 app.post('/convert', upload.single('video'), async (req, res) => {
   const quality = req.body.quality || '720p';
@@ -137,24 +139,24 @@ async function processQueue(taskId, taskData) {
 
   await Task.updateOne({ taskId }, { status: 'processing' }); // อัปเดตสถานะใน MongoDB
 
-  ffmpeg(inputPath)
+  // เริ่มกระบวนการ ffmpeg
+  ffmpegProcesses[taskId] = ffmpeg(inputPath)
     .size(videoSize)
     .videoCodec('libx264')
     .outputOptions(['-preset', 'fast', '-crf', '22'])
     .on('progress', async (progress) => {
       const percent = Math.round(progress.percent);
-      await Task.updateOne({ taskId }, { status: 'processing', percent }); // บันทึกเปอร์เซ็นต์ใน MongoDB
+      await Task.updateOne({ taskId }, { status: 'processing', percent });
     })
     .on('end', async () => {
-      await Task.updateOne({ taskId }, { status: 'completed', outputFile: `/${outputFileName}` }); // อัปเดตสถานะใน MongoDB
-      // Clean up uploaded/input file
+      delete ffmpegProcesses[taskId]; // ลบกระบวนการเมื่อเสร็จสิ้น
+      await Task.updateOne({ taskId }, { status: 'completed', outputFile: `/${outputFileName}` });
       fs.unlink(inputPath, () => {});
-
-      // เรียกใช้คิวถัดไป
       processNextQueue();
     })
     .on('error', async (err) => {
-      await Task.updateOne({ taskId }, { status: 'error', error: err.message }); // อัปเดตสถานะใน MongoDB
+      delete ffmpegProcesses[taskId]; // ลบกระบวนการเมื่อเกิดข้อผิดพลาด
+      await Task.updateOne({ taskId }, { status: 'error', error: err.message });
       fs.unlink(inputPath, () => {});
     })
     .save(outputPath);
@@ -172,6 +174,20 @@ async function processNextQueue() {
     processQueue(nextTask.taskId, nextTask); // เรียกใช้ processQueue สำหรับ task ถัดไป
   }
 }
+
+// Endpoint: Stop ffmpeg process
+app.post('/stop/:taskId', async (req, res) => {
+  const taskId = req.params.taskId;
+
+  if (ffmpegProcesses[taskId]) {
+    ffmpegProcesses[taskId].kill('SIGINT'); // ส่งสัญญาณให้หยุดกระบวนการ
+    delete ffmpegProcesses[taskId]; // ลบกระบวนการจากรายการ
+    await Task.updateOne({ taskId }, { status: 'stopped' }); // อัปเดตสถานะใน MongoDB
+    return res.json({ success: true, message: `Process for task ${taskId} stopped.` });
+  } else {
+    return res.status(404).json({ success: false, error: 'Task not found or already completed.' });
+  }
+});
 
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
