@@ -89,25 +89,27 @@ app.post('/convert', upload.single('video'), async (req, res) => {
 
 // Endpoint: Get all tasks in processing or on hold
 app.get('/tasks', async (req, res) => {
-  const stream = redisClient.scanStream({
-    match: 'convert:*',
-    count: 100
-  });
-
   const tasks = [];
+  let cursor = '0';
 
-  stream.on('data', async (keys) => {
+  do {
+    // ใช้ scan แทน scanStream
+    const reply = await redisClient.scan(cursor, {
+      MATCH: 'convert:*', // ค้นหาคีย์ที่มีรูปแบบเฉพาะ
+      COUNT: 100 // จำนวนคีย์ที่ดึงในแต่ละครั้ง
+    });
+    cursor = reply[0]; // อัปเดต cursor สำหรับการวนรอบถัดไป
+    const keys = reply[1];
+
     const taskPromises = keys.map(async (key) => {
       const task = await redisClient.get(key);
       return JSON.parse(task);
     });
     tasks.push(...await Promise.all(taskPromises));
-  });
+  } while (cursor !== '0'); // ทำซ้ำจนกว่าจะไม่มีคีย์เพิ่มเติม
 
-  stream.on('end', () => {
-    const filteredTasks = tasks.filter(task => task && (task.status === 'processing' || task.status === 'queued'));
-    res.json({ success: true, tasks: filteredTasks });
-  });
+  const filteredTasks = tasks.filter(task => task && (task.status === 'processing' || task.status === 'queued'));
+  res.json({ success: true, tasks: filteredTasks });
 });
 
 // Endpoint: Check status and get result
