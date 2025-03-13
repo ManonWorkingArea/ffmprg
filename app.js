@@ -7,7 +7,7 @@ const { createClient } = require('redis');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 const fs = require('fs'); 
-const redis = require('redis');
+const mongoose = require('mongoose');
 
 const app = express();
 const port = process.env.PORT || 6000;
@@ -19,61 +19,64 @@ app.use(express.static('outputs'));
 
 const upload = multer({ dest: 'uploads/' });
 
-// Redis Client Setup
-const redisClient = redis.createClient({
-  url: 'redis://default:e3PHPsEo92tMA5mNmWmgV8O6cn4tlblB@redis-19867.fcrce171.ap-south-1-1.ec2.redns.redis-cloud.com:19867',
-  socket: {
-    tls: true,
-    connectTimeout: 10000,
-    keepAlive: 5000,
-    reconnectStrategy: (retries) => {
-      const delay = Math.min(50 * 2 ** retries + Math.random() * 100, 3000);
-      console.warn(`Reconnecting to Redis... Attempt ${retries}, retrying in ${delay}ms`);
-      return delay;
-    }
-  }
+// เชื่อมต่อกับ MongoDB
+mongoose.connect('mongodb+srv://vue:Qazwsx1234!!@cloudmongodb.wpc62e9.mongodb.net/API', {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+}).then(() => {
+  console.log('MongoDB :: Connected.');
+}).catch(err => {
+  console.error('Failed to connect to MongoDB:', err);
 });
 
-// Event Listeners
-redisClient.on('connect', () => console.log('RED :: Connected.'));
-redisClient.on('ready', () => console.log('RED :: Ready.'));
-redisClient.on('error', (err) => {
-  console.error('RED :: Error:', err);
-  // เพิ่มการจัดการข้อผิดพลาดเพิ่มเติมที่นี่
+// สร้าง Schema และ Model สำหรับคิว
+const taskSchema = new mongoose.Schema({
+  taskId: String,
+  status: String,
+  quality: String,
+  createdAt: Date,
+  inputPath: String,
+  outputFile: String,
+  percent: Number,
+  url: String
 });
-redisClient.on('end', () => console.warn('RED :: Closed.'));
-redisClient.on('reconnecting', () => console.warn('RED :: Reconnecting...'));
 
-// Connect to Redis
-(async () => {
-  try {
-    await redisClient.connect();
-  } catch (err) {
-    console.error('Failed to connect to Redis:', err);
-  }
-})();
+const Task = mongoose.model('Queue', taskSchema);
 
 // Endpoint: Add conversion task to queue
 app.post('/convert', upload.single('video'), async (req, res) => {
-  const taskId = uuidv4();
   const quality = req.body.quality || '720p';
-
-  const taskData = {
-    status: 'queued',
-    quality,
-    createdAt: Date.now(),
-    outputFile: null
-  };
+  let taskId;
 
   if (req.file) {
-    taskData.inputPath = req.file.path;
+    // ตรวจสอบว่ามีงานที่มี inputPath เดียวกันอยู่ใน MongoDB หรือไม่
+    const existingTask = await Task.findOne({ inputPath: req.file.path });
+    if (existingTask) {
+      return res.json({ success: true, taskId: existingTask.taskId }); // คืนค่า taskId ของงานที่มีอยู่
+    }
+    taskId = uuidv4();
   } else if (req.body.url) {
-    taskData.url = req.body.url;
+    // ตรวจสอบว่ามีงานที่มี url เดียวกันอยู่ใน MongoDB หรือไม่
+    const existingTask = await Task.findOne({ url: req.body.url });
+    if (existingTask) {
+      return res.json({ success: true, taskId: existingTask.taskId }); // คืนค่า taskId ของงานที่มีอยู่
+    }
+    taskId = uuidv4();
   } else {
     return res.status(400).json({ success: false, error: 'Video file or URL required' });
   }
 
-  await redisClient.set(taskId, JSON.stringify(taskData));
+  const taskData = {
+    taskId,
+    status: 'queued',
+    quality,
+    createdAt: Date.now(),
+    outputFile: null,
+    inputPath: req.file ? req.file.path : undefined,
+    url: req.body.url
+  };
+
+  await Task.create(taskData); // บันทึกข้อมูลใน MongoDB
 
   processQueue(taskId, taskData);
 
@@ -83,20 +86,30 @@ app.post('/convert', upload.single('video'), async (req, res) => {
 // Endpoint: Check status and get result
 app.get('/status/:taskId', async (req, res) => {
   const taskId = req.params.taskId;
-  const task = await redisClient.get(taskId);
+  const task = await Task.findOne({ taskId }); // ค้นหาข้อมูลใน MongoDB
 
   if (!task) {
     return res.status(404).json({ success: false, error: 'Task not found' });
   }
 
-  const taskData = JSON.parse(task);
   const response = {
     success: true,
-    task: taskData,
-    percent: taskData.status === 'processing' ? calculatePercent(taskData) : 100 // คำนวณเปอร์เซ็นต์ถ้ากำลังประมวลผล
+    task,
+    percent: task.status === 'processing' ? calculatePercent(task) : 100 // คำนวณเปอร์เซ็นต์ถ้ากำลังประมวลผล
   };
 
   res.json(response);
+});
+
+// Endpoint: Get all tasks in the queue
+app.get('/tasks', async (req, res) => {
+  try {
+    const tasks = await Task.find(); // ดึงข้อมูลทั้งหมดจาก MongoDB
+    res.json({ success: true, tasks }); // คืนค่าข้อมูลทั้งหมด
+  } catch (error) {
+    console.error('Error fetching tasks:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch tasks' });
+  }
 });
 
 // Processing function
@@ -123,26 +136,18 @@ async function processQueue(taskId, taskData) {
     await new Promise(resolve => writer.on('finish', resolve));
   }
 
-  await redisClient.set(taskId, JSON.stringify({ ...taskData, status: 'processing' }));
+  await Task.updateOne({ taskId }, { status: 'processing' }); // อัปเดตสถานะใน MongoDB
 
   ffmpeg(inputPath)
     .size(videoSize)
     .videoCodec('libx264')
     .outputOptions(['-preset', 'fast', '-crf', '22'])
-    .on('progress', (progress) => {
+    .on('progress', async (progress) => {
       const percent = Math.round(progress.percent);
-      redisClient.set(taskId, JSON.stringify({
-        ...taskData,
-        status: 'processing',
-        percent // บันทึกเปอร์เซ็นต์ใน Redis
-      }));
+      await Task.updateOne({ taskId }, { status: 'processing', percent }); // บันทึกเปอร์เซ็นต์ใน MongoDB
     })
     .on('end', async () => {
-      await redisClient.set(taskId, JSON.stringify({
-        ...taskData,
-        status: 'completed',
-        outputFile: `/${outputFileName}`
-      }));
+      await Task.updateOne({ taskId }, { status: 'completed', outputFile: `/${outputFileName}` }); // อัปเดตสถานะใน MongoDB
       // Clean up uploaded/input file
       fs.unlink(inputPath, () => {});
 
@@ -150,11 +155,7 @@ async function processQueue(taskId, taskData) {
       processNextQueue();
     })
     .on('error', async (err) => {
-      await redisClient.set(taskId, JSON.stringify({
-        ...taskData,
-        status: 'error',
-        error: err.message
-      }));
+      await Task.updateOne({ taskId }, { status: 'error', error: err.message }); // อัปเดตสถานะใน MongoDB
       fs.unlink(inputPath, () => {});
     })
     .save(outputPath);
@@ -167,10 +168,9 @@ function calculatePercent(taskData) {
 
 // ฟังก์ชันใหม่สำหรับจัดการคิวถัดไป
 async function processNextQueue() {
-  const nextTaskId = await redisClient.lpop('taskQueue'); // ดึง taskId ถัดไปจากคิว
-  if (nextTaskId) {
-    const taskData = JSON.parse(await redisClient.get(nextTaskId));
-    processQueue(nextTaskId, taskData); // เรียกใช้ processQueue สำหรับ task ถัดไป
+  const nextTask = await Task.findOneAndDelete({ status: 'queued' }); // ดึง task ถัดไปจาก MongoDB
+  if (nextTask) {
+    processQueue(nextTask.taskId, nextTask); // เรียกใช้ processQueue สำหรับ task ถัดไป
   }
 }
 
