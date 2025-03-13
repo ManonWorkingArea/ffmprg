@@ -149,3 +149,10 @@ async function processNextQueue() {
     processNextQueue();
   }
 }
+
+setInterval(async () => {
+  const nextTask = await MongoDB.getNextQueuedTask();
+  if (nextTask) {
+    processQueue(nextTask.taskId, nextTask);
+  }
+}, 5000); // ตรวจสอบทุก 5 วินาที
