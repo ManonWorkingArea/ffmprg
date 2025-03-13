@@ -10,7 +10,7 @@ const fs = require('fs');
 const mongoose = require('mongoose');
 
 const app = express();
-const port = process.env.PORT || 6000;
+const port = process.env.PORT || 3000;
 
 app.use(cors());
 
@@ -45,6 +45,8 @@ const Task = mongoose.model('Queue', taskSchema);
 
 let ffmpegProcesses = {}; // เก็บข้อมูลเกี่ยวกับกระบวนการ ffmpeg
 let isProcessing = false; // ตัวแปรเพื่อบอกสถานะการประมวลผล
+
+const baseUrl = `http://159.65.131.165:${port}`; // อัปเดต base URL
 
 // Endpoint: Add conversion task to queue
 app.post('/convert', upload.single('video'), async (req, res) => {
@@ -83,7 +85,7 @@ app.post('/convert', upload.single('video'), async (req, res) => {
 
   processQueue(taskId, taskData);
 
-  res.json({ success: true, taskId, downloadLink: `/outputs/${taskId}-output.mp4` }); // ส่งลิงก์ดาวน์โหลด
+  res.json({ success: true, taskId, downloadLink: `${baseUrl}/outputs/${taskId}-output.mp4` }); // ส่งลิงก์ดาวน์โหลด
 });
 
 // Endpoint: Check status and get result
@@ -99,7 +101,7 @@ app.get('/status/:taskId', async (req, res) => {
     success: true,
     task,
     percent: task.status === 'processing' ? calculatePercent(task) : 100, // คำนวณเปอร์เซ็นต์ถ้ากำลังประมวลผล
-    downloadLink: task.status === 'completed' ? `/outputs/${taskId}-output.mp4` : null // ส่งลิงก์ดาวน์โหลดถ้าสถานะเป็น 'completed'
+    downloadLink: task.status === 'completed' ? `${baseUrl}/outputs/${taskId}-output.mp4` : null // ส่งลิงก์ดาวน์โหลดถ้าสถานะเป็น 'completed'
   };
 
   res.json(response);
