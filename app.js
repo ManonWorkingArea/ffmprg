@@ -190,7 +190,7 @@ async function processQueue(taskId, taskData) {
   ffmpegProcesses[taskId] = ffmpeg(inputPath)
     .size(videoSize)
     .videoCodec('libx264')
-    .outputOptions(['-preset', 'fast', '-crf', '22'])
+    .outputOptions(['-preset', 'veryfast', '-crf', '22'])
     .on('progress', async (progress) => {
       const percent = Math.round(progress.percent);
       await Task.updateOne({ taskId }, { status: 'processing', percent });
