@@ -23,9 +23,18 @@ const redisClient = createClient({
   url: 'redis://default:e3PHPsEo92tMA5mNmWmgV8O6cn4tlblB@redis-19867.fcrce171.ap-south-1-1.ec2.redns.redis-cloud.com:19867'
 });
 
-redisClient.connect().then(() => {
-  console.log('Redis connected');
+redisClient.on('error', (err) => {
+  console.error('Redis Client Error', err);
 });
+
+(async () => {
+  try {
+    await redisClient.connect();
+    console.log('Redis connected');
+  } catch (error) {
+    console.error('Failed to connect to Redis:', error);
+  }
+})();
 
 // Endpoint: Add conversion task to queue
 app.post('/convert', upload.single('video'), async (req, res) => {
