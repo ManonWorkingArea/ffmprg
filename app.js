@@ -145,6 +145,9 @@ async function processQueue(taskId, taskData) {
       }));
       // Clean up uploaded/input file
       fs.unlink(inputPath, () => {});
+
+      // เรียกใช้คิวถัดไป
+      processNextQueue();
     })
     .on('error', async (err) => {
       await redisClient.set(taskId, JSON.stringify({
@@ -160,6 +163,15 @@ async function processQueue(taskId, taskData) {
 // ฟังก์ชันคำนวณเปอร์เซ็นต์
 function calculatePercent(taskData) {
   return taskData.percent || 0; // คืนค่าเปอร์เซ็นต์จากข้อมูลที่บันทึกไว้
+}
+
+// ฟังก์ชันใหม่สำหรับจัดการคิวถัดไป
+async function processNextQueue() {
+  const nextTaskId = await redisClient.lpop('taskQueue'); // ดึง taskId ถัดไปจากคิว
+  if (nextTaskId) {
+    const taskData = JSON.parse(await redisClient.get(nextTaskId));
+    processQueue(nextTaskId, taskData); // เรียกใช้ processQueue สำหรับ task ถัดไป
+  }
 }
 
 app.listen(port, () => {
