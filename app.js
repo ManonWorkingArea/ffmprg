@@ -113,6 +113,25 @@ app.get('/tasks', async (req, res) => {
   }
 });
 
+// Endpoint: Start task by ID
+app.post('/start/:taskId', async (req, res) => {
+  const taskId = req.params.taskId;
+  const task = await Task.findOne({ taskId }); // ค้นหางานใน MongoDB
+
+  if (!task) {
+    return res.status(404).json({ success: false, error: 'Task not found' });
+  }
+
+  if (task.status !== 'queued') {
+    return res.status(400).json({ success: false, error: 'Task is not in a queued state' });
+  }
+
+  // เริ่มกระบวนการ ffmpeg
+  processQueue(taskId, task);
+
+  res.json({ success: true, message: `Task ${taskId} started.` });
+});
+
 // Processing function
 async function processQueue(taskId, taskData) {
   const outputFileName = `${taskId}-output.mp4`;
