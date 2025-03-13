@@ -25,7 +25,21 @@ const redisClient = createClient({
 
 redisClient.on('error', (err) => {
   console.error('Redis Client Error', err);
+  // Attempt to reconnect if the socket is closed unexpectedly
+  if (err.message.includes('Socket closed unexpectedly')) {
+    reconnect();
+  }
 });
+
+async function reconnect() {
+  try {
+    await redisClient.connect();
+    console.log('Redis reconnected');
+  } catch (error) {
+    console.error('Failed to reconnect to Redis:', error);
+    setTimeout(reconnect, 5000); // Retry after 5 seconds
+  }
+}
 
 (async () => {
   try {
