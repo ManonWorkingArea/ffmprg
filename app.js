@@ -122,8 +122,9 @@ app.post('/start/:taskId', async (req, res) => {
     return res.status(404).json({ success: false, error: 'Task not found' });
   }
 
-  if (task.status !== 'queued') {
-    return res.status(400).json({ success: false, error: 'Task is not in a queued state' });
+  // อนุญาตให้เริ่มงานใหม่ได้หากสถานะเป็น 'error'
+  if (task.status !== 'queued' && task.status !== 'error') {
+    return res.status(400).json({ success: false, error: 'Task is not in a queued or error state' });
   }
 
   // เริ่มกระบวนการ ffmpeg
