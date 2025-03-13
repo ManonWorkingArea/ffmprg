@@ -209,6 +209,9 @@ app.post('/stop/:taskId', async (req, res) => {
   }
 });
 
+// Serve 'outputs' folder publicly
+app.use('/outputs', express.static(path.join(__dirname, 'outputs')));
+
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
 });
