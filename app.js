@@ -40,6 +40,7 @@ async function reconnect() {
   try {
     await redisClient.connect();
     console.log('Redis reconnected');
+    isConnected = true; // Update connection status
   } catch (error) {
     console.error('Failed to reconnect to Redis:', error);
     setTimeout(() => {
