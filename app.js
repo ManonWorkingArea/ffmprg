@@ -3,10 +3,11 @@ const multer = require('multer');
 const ffmpeg = require('fluent-ffmpeg');
 const cors = require('cors');
 const path = require('path');
+const { createClient } = require('redis');
 const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
-const fs = require('fs');
-const MongoDB = require('./middleware/mongodb'); // Import middleware
+const fs = require('fs'); 
+const mongoose = require('mongoose');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -17,9 +18,36 @@ app.use(express.static('outputs'));
 
 const upload = multer({ dest: 'uploads/' });
 
-let ffmpegProcesses = {}; // Store active ffmpeg processes
-let isProcessing = false;
-const baseUrl = `http://159.65.131.165:${port}`;
+// เชื่อมต่อกับ MongoDB
+mongoose.connect('mongodb+srv://vue:Qazwsx1234!!@cloudmongodb.wpc62e9.mongodb.net/API', {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+}).then(() => {
+  console.log('MongoDB :: Connected.');
+}).catch(err => {
+  console.error('Failed to connect to MongoDB:', err);
+});
+
+// สร้าง Schema และ Model สำหรับคิว
+const taskSchema = new mongoose.Schema({
+  taskId: String,
+  status: String,
+  quality: String,
+  createdAt: Date,
+  inputPath: String,
+  outputFile: String,
+  percent: Number,
+  url: String
+});
+
+const Task = mongoose.model('Queue', taskSchema);
+
+let ffmpegProcesses = {}; // เก็บข้อมูลเกี่ยวกับกระบวนการ ffmpeg
+let isProcessing = false; // ตัวแปรเพื่อบอกสถานะการประมวลผล
+
+const baseUrl = `http://159.65.131.165:${port}`; // อัปเดต base URL
+
+// Grouped Endpoints
 
 // Endpoint: Add conversion task to queue
 app.post('/convert', upload.single('video'), async (req, res) => {
@@ -27,12 +55,18 @@ app.post('/convert', upload.single('video'), async (req, res) => {
   let taskId;
 
   if (req.file) {
-    const existingTask = await MongoDB.getTaskByInputPath(req.file.path);
-    if (existingTask) return res.json({ success: true, taskId: existingTask.taskId });
+    // ตรวจสอบว่ามีงานที่มี inputPath เดียวกันอยู่ใน MongoDB หรือไม่
+    const existingTask = await Task.findOne({ inputPath: req.file.path });
+    if (existingTask) {
+      return res.json({ success: true, taskId: existingTask.taskId }); // คืนค่า taskId ของงานที่มีอยู่
+    }
     taskId = uuidv4();
   } else if (req.body.url) {
-    const existingTask = await MongoDB.getTaskByUrl(req.body.url);
-    if (existingTask) return res.json({ success: true, taskId: existingTask.taskId });
+    // ตรวจสอบว่ามีงานที่มี url เดียวกันอยู่ใน MongoDB หรือไม่
+    const existingTask = await Task.findOne({ url: req.body.url });
+    if (existingTask) {
+      return res.json({ success: true, taskId: existingTask.taskId }); // คืนค่า taskId ของงานที่มีอยู่
+    }
     taskId = uuidv4();
   } else {
     return res.status(400).json({ success: false, error: 'Video file or URL required' });
@@ -48,63 +82,101 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     url: req.body.url
   };
 
-  await MongoDB.createTask(taskData);
+  await Task.create(taskData); // บันทึกข้อมูลใน MongoDB
+
   processQueue(taskId, taskData);
 
-  res.json({ success: true, taskId, downloadLink: `${baseUrl}/outputs/${taskId}-output.mp4` });
+  res.json({ success: true, taskId, downloadLink: `${baseUrl}/outputs/${taskId}-output.mp4` }); // ส่งลิงก์ดาวน์โหลด
 });
 
 // Endpoint: Check status and get result
 app.get('/status/:taskId', async (req, res) => {
-  const task = await MongoDB.getTaskById(req.params.taskId);
-  if (!task) return res.status(404).json({ success: false, error: 'Task not found' });
+  const taskId = req.params.taskId;
+  const task = await Task.findOne({ taskId }); // ค้นหาข้อมูลใน MongoDB
 
-  res.json({
+  if (!task) {
+    return res.status(404).json({ success: false, error: 'Task not found' });
+  }
+  
+  const response = {
     success: true,
     task,
-    percent: task.status === 'processing' ? calculatePercent(task) : 100,
-    downloadLink: task.status === 'completed' ? `${baseUrl}/outputs/${task.taskId}-output.mp4` : null
-  });
+    percent: task.status === 'processing' ? calculatePercent(task) : 100, // คำนวณเปอร์เซ็นต์ถ้ากำลังประมวลผล
+    downloadLink: task.status === 'completed' ? `${baseUrl}/outputs/${taskId}-output.mp4` : null // ส่งลิงก์ดาวน์โหลดถ้าสถานะเป็น 'completed'
+  };
+
+  res.json(response);
 });
 
-// Endpoint: Get all tasks
+// Endpoint: Get all tasks in the queue
 app.get('/tasks', async (req, res) => {
-  const tasks = await MongoDB.getAllTasks();
-  res.json({ success: true, tasks });
+  try {
+    const tasks = await Task.find(); // ดึงข้อมูลทั้งหมดจาก MongoDB
+    res.json({ success: true, tasks }); // คืนค่าข้อมูลทั้งหมด
+  } catch (error) {
+    console.error('Error fetching tasks:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch tasks' });
+  }
 });
 
-// Endpoint: Start task manually
+// Endpoint: Start task by ID
 app.post('/start/:taskId', async (req, res) => {
-  const task = await MongoDB.getTaskById(req.params.taskId);
-  if (!task || (task.status !== 'queued' && task.status !== 'error')) {
-    return res.status(400).json({ success: false, error: 'Task not in a valid state' });
+  const taskId = req.params.taskId;
+  const task = await Task.findOne({ taskId }); // ค้นหางานใน MongoDB
+
+  if (!task) {
+    return res.status(404).json({ success: false, error: 'Task not found' });
   }
-  processQueue(task.taskId, task);
-  res.json({ success: true, message: `Task ${task.taskId} started.` });
+
+  // อนุญาตให้เริ่มงานใหม่ได้หากสถานะเป็น 'error'
+  if (task.status !== 'queued' && task.status !== 'error') {
+    return res.status(400).json({ success: false, error: 'Task is not in a queued or error state' });
+  }
+
+  // เริ่มกระบวนการ ffmpeg
+  processQueue(taskId, task);
+
+  res.json({ success: true, message: `Task ${taskId} started.` });
 });
 
 // Endpoint: Stop ffmpeg process
 app.post('/stop/:taskId', async (req, res) => {
   const taskId = req.params.taskId;
+
   if (ffmpegProcesses[taskId]) {
-    ffmpegProcesses[taskId].kill('SIGINT');
-    delete ffmpegProcesses[taskId];
-    await MongoDB.updateTask(taskId, { status: 'stopped' });
+    ffmpegProcesses[taskId].kill('SIGINT'); // ส่งสัญญาณให้หยุดกระบวนการ
+    delete ffmpegProcesses[taskId]; // ลบกระบวนการจากรายการ
+    await Task.updateOne({ taskId }, { status: 'stopped' }); // อัปเดตสถานะใน MongoDB
     return res.json({ success: true, message: `Process for task ${taskId} stopped.` });
+  } else {
+    return res.status(404).json({ success: false, error: 'Task not found or already completed.' });
   }
-  res.status(404).json({ success: false, error: 'Task not found or already completed.' });
 });
 
+// Serve 'outputs' folder publicly
 app.use('/outputs', express.static(path.join(__dirname, 'outputs')));
-app.listen(port, () => console.log(`Server running on port ${port}`));
+
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
 
 // Processing function
 async function processQueue(taskId, taskData) {
   const outputFileName = `${taskId}-output.mp4`;
   const outputPath = path.join(__dirname, 'outputs', outputFileName);
-  let videoSize = { '420p': '640x360', '720p': '1280x720', '1080p': '1920x1080', '1920p': '1920x1080' }[taskData.quality] || '1280x720';
+
+  let videoSize;
+  switch (taskData.quality) {
+    case '420p': videoSize = '640x360'; break;
+    case '720p': videoSize = '1280x720'; break;
+    case '1080p': videoSize = '1920x1080'; break;
+    case '1920p': videoSize = '1920x1080'; break;
+    default: videoSize = '1280x720';
+  }
+
   const inputPath = taskData.inputPath || path.join('uploads', `${taskId}-input.mp4`);
 
+  // If URL provided, download the video
   if (taskData.url) {
     const writer = fs.createWriteStream(inputPath);
     const response = await axios.get(taskData.url, { responseType: 'stream' });
@@ -112,49 +184,45 @@ async function processQueue(taskId, taskData) {
     await new Promise(resolve => writer.on('finish', resolve));
   }
 
-  await MongoDB.updateTask(taskId, { status: 'processing' });
+  await Task.updateOne({ taskId }, { status: 'processing' }); // อัปเดตสถานะใน MongoDB
+
+  // เริ่มกระบวนการ ffmpeg
   ffmpegProcesses[taskId] = ffmpeg(inputPath)
     .size(videoSize)
     .videoCodec('libx264')
     .outputOptions(['-preset', 'fast', '-crf', '22'])
-    .on('progress', async progress => {
-      await MongoDB.updateTask(taskId, { status: 'processing', percent: Math.round(progress.percent) });
+    .on('progress', async (progress) => {
+      const percent = Math.round(progress.percent);
+      await Task.updateOne({ taskId }, { status: 'processing', percent });
     })
     .on('end', async () => {
-      delete ffmpegProcesses[taskId];
-      await MongoDB.updateTask(taskId, { status: 'completed', outputFile: `/${outputFileName}` });
+      delete ffmpegProcesses[taskId]; // ลบกระบวนการเมื่อเสร็จสิ้น
+      await Task.updateOne({ taskId }, { status: 'completed', outputFile: `/${outputFileName}` });
       fs.unlink(inputPath, () => {});
-      processNextQueue();
+      processNextQueue(); // เรียกใช้ processNextQueue เพื่อประมวลผลงานถัดไป
     })
-    .on('error', async err => {
-      delete ffmpegProcesses[taskId];
-      await MongoDB.updateTask(taskId, { status: 'error', error: err.message });
+    .on('error', async (err) => {
+      delete ffmpegProcesses[taskId]; // ลบกระบวนการเมื่อเกิดข้อผิดพลาด
+      await Task.updateOne({ taskId }, { status: 'error', error: err.message });
       fs.unlink(inputPath, () => {});
-      processNextQueue();
+      processNextQueue(); // เรียกใช้ processNextQueue เพื่อประมวลผลงานถัดไป
     })
     .save(outputPath);
 }
 
+// ฟังก์ชันคำนวณเปอร์เซ็นต์
 function calculatePercent(taskData) {
-  return taskData.percent || 0;
+  return taskData.percent || 0; // คืนค่าเปอร์เซ็นต์จากข้อมูลที่บันทึกไว้
 }
 
-
+// ฟังก์ชันใหม่สำหรับจัดการคิวถัดไป
 async function processNextQueue() {
-  if (isProcessing) return;
-  const nextTask = await MongoDB.getNextQueuedTask();
+  if (isProcessing) return; // ถ้ากำลังประมวลผลอยู่ ให้หยุด
+  const nextTask = await Task.findOneAndDelete({ status: 'queued' }); // ดึง task ถัดไปจาก MongoDB
   if (nextTask) {
-    isProcessing = true;
-    await processQueue(nextTask.taskId, nextTask);
-    isProcessing = false;
-    processNextQueue();
+    isProcessing = true; // ตั้งค่าสถานะการประมวลผล
+    await processQueue(nextTask.taskId, nextTask); // เรียกใช้ processQueue สำหรับ task ถัดไป
+    isProcessing = false; // รีเซ็ตสถานะการประมวลผล
+    processNextQueue(); // เรียกใช้ processNextQueue เพื่อประมวลผลงานถัดไป
   }
 }
-
-
-setInterval(async () => {
-  const nextTask = await MongoDB.getNextQueuedTask();
-  if (nextTask) {
-    processQueue(nextTask.taskId, nextTask);
-  }
-}, 5000); // ตรวจสอบทุก 5 วินาที
