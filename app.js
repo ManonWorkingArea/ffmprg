@@ -1,10 +1,12 @@
 const express = require('express');
 const multer = require('multer');
+const ffmpeg = require('fluent-ffmpeg');
 const cors = require('cors');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
-const MongoDB = require('./middleware/mongodb'); // Import MongoDB middleware
-const FFMPEG = require('./middleware/ffmpeg'); // Import FFmpeg middleware
+const axios = require('axios');
+const fs = require('fs');
+const MongoDB = require('./middleware/mongodb'); // Import middleware
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -15,6 +17,8 @@ app.use(express.static('outputs'));
 
 const upload = multer({ dest: 'uploads/' });
 
+let ffmpegProcesses = {}; // Store active ffmpeg processes
+let isProcessing = false;
 const baseUrl = `http://159.65.131.165:${port}`;
 
 // Endpoint: Add conversion task to queue
@@ -45,7 +49,7 @@ app.post('/convert', upload.single('video'), async (req, res) => {
   };
 
   await MongoDB.createTask(taskData);
-  FFMPEG.processQueue(taskId, taskData);
+  processQueue(taskId, taskData);
 
   res.json({ success: true, taskId, downloadLink: `${baseUrl}/outputs/${taskId}-output.mp4` });
 });
@@ -58,7 +62,7 @@ app.get('/status/:taskId', async (req, res) => {
   res.json({
     success: true,
     task,
-    percent: task.status === 'processing' ? task.percent || 0 : 100,
+    percent: task.status === 'processing' ? calculatePercent(task) : 100,
     downloadLink: task.status === 'completed' ? `${baseUrl}/outputs/${task.taskId}-output.mp4` : null
   });
 });
@@ -75,15 +79,73 @@ app.post('/start/:taskId', async (req, res) => {
   if (!task || (task.status !== 'queued' && task.status !== 'error')) {
     return res.status(400).json({ success: false, error: 'Task not in a valid state' });
   }
-  FFMPEG.processQueue(task.taskId, task);
+  processQueue(task.taskId, task);
   res.json({ success: true, message: `Task ${task.taskId} started.` });
 });
 
 // Endpoint: Stop ffmpeg process
 app.post('/stop/:taskId', async (req, res) => {
-  const result = await FFMPEG.stopProcess(req.params.taskId);
-  res.json(result);
+  const taskId = req.params.taskId;
+  if (ffmpegProcesses[taskId]) {
+    ffmpegProcesses[taskId].kill('SIGINT');
+    delete ffmpegProcesses[taskId];
+    await MongoDB.updateTask(taskId, { status: 'stopped' });
+    return res.json({ success: true, message: `Process for task ${taskId} stopped.` });
+  }
+  res.status(404).json({ success: false, error: 'Task not found or already completed.' });
 });
 
 app.use('/outputs', express.static(path.join(__dirname, 'outputs')));
 app.listen(port, () => console.log(`Server running on port ${port}`));
+
+// Processing function
+async function processQueue(taskId, taskData) {
+  const outputFileName = `${taskId}-output.mp4`;
+  const outputPath = path.join(__dirname, 'outputs', outputFileName);
+  let videoSize = { '420p': '640x360', '720p': '1280x720', '1080p': '1920x1080', '1920p': '1920x1080' }[taskData.quality] || '1280x720';
+  const inputPath = taskData.inputPath || path.join('uploads', `${taskId}-input.mp4`);
+
+  if (taskData.url) {
+    const writer = fs.createWriteStream(inputPath);
+    const response = await axios.get(taskData.url, { responseType: 'stream' });
+    response.data.pipe(writer);
+    await new Promise(resolve => writer.on('finish', resolve));
+  }
+
+  await MongoDB.updateTask(taskId, { status: 'processing' });
+  ffmpegProcesses[taskId] = ffmpeg(inputPath)
+    .size(videoSize)
+    .videoCodec('libx264')
+    .outputOptions(['-preset', 'fast', '-crf', '22'])
+    .on('progress', async progress => {
+      await MongoDB.updateTask(taskId, { status: 'processing', percent: Math.round(progress.percent) });
+    })
+    .on('end', async () => {
+      delete ffmpegProcesses[taskId];
+      await MongoDB.updateTask(taskId, { status: 'completed', outputFile: `/${outputFileName}` });
+      fs.unlink(inputPath, () => {});
+      processNextQueue();
+    })
+    .on('error', async err => {
+      delete ffmpegProcesses[taskId];
+      await MongoDB.updateTask(taskId, { status: 'error', error: err.message });
+      fs.unlink(inputPath, () => {});
+      processNextQueue();
+    })
+    .save(outputPath);
+}
+
+function calculatePercent(taskData) {
+  return taskData.percent || 0;
+}
+
+async function processNextQueue() {
+  if (isProcessing) return;
+  const nextTask = await MongoDB.getNextQueuedTask();
+  if (nextTask) {
+    isProcessing = true;
+    await processQueue(nextTask.taskId, nextTask);
+    isProcessing = false;
+    processNextQueue();
+  }
+}
