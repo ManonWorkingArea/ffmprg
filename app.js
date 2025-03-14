@@ -254,6 +254,11 @@ async function processQueue(taskId, taskData) {
   await Task.updateOne({ taskId }, { status: 'processing' }); // อัปเดตสถานะใน MongoDB
   console.log(taskData.space);
   
+
+  const spaceData = JSON.parse(JSON.stringify(await getSpaceData(hostnameData.spaceId)));
+  taskData.space = spaceData;
+  console.log("taskData.space",taskData.space);
+
   let s3Key = taskData.space.s3Key;
   let s3Secret = taskData.space.s3Secret;
 
