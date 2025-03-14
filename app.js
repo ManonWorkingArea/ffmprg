@@ -279,6 +279,13 @@ async function processQueue(taskId, taskData) {
     .on('progress', async (progress) => {
       const percent = Math.round(progress.percent);
       await Task.updateOne({ taskId }, { status: 'processing', percent });
+
+      // อัปเดตข้อมูลในคอลเลกชัน storage โดยใช้เปอร์เซ็นต์
+      await Storage.findOneAndUpdate(
+        { _id: new mongoose.Types.ObjectId(taskData.storage) },
+        { $set: { [`transcode.${taskData.quality}`]: remoteUrl, percent } }, // อัปเดตเปอร์เซ็นต์
+        { new: true } // Returns the updated document
+      ).exec(); // เพิ่ม .exec() เพื่อให้แน่ใจว่าคำสั่งจะถูกดำเนินการ
     })    
     .on('end', async () => {
       delete ffmpegProcesses[taskId]; // ลบกระบวนการเมื่อเสร็จสิ้น
@@ -297,10 +304,10 @@ async function processQueue(taskId, taskData) {
         const uploadResult = await s3Client.putObject(params); // เปลี่ยนเป็นใช้ putObject
         const remoteUrl = `${taskData.space.s3Endpoint}outputs/${outputFileName}`; // สร้าง URL ของไฟล์ที่อัปโหลด
 
-        // อัปเดตข้อมูลในคอลเลกชัน storage
-        const updatedDoc = await Storage.findOneAndUpdate(
+        // อัปเดตข้อมูลในคอลเลกชัน storage โดยใช้เปอร์เซ็นต์
+        await Storage.findOneAndUpdate(
           { _id: new mongoose.Types.ObjectId(taskData.storage) },
-          { $set: { [`transcode.${taskData.quality}`]: remoteUrl } },
+          { $set: { [`transcode.${taskData.quality}`]: remoteUrl, percent: 100 } }, // อัปเดต remoteUrl และเปอร์เซ็นต์
           { new: true } // Returns the updated document
         ).exec(); // เพิ่ม .exec() เพื่อให้แน่ใจว่าคำสั่งจะถูกดำเนินการ
 
