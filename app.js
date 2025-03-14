@@ -311,19 +311,22 @@ async function processQueue(taskId, taskData) {
         const remoteUrl = `${taskData.space.s3Endpoint}outputs/${outputFileName}`; // สร้าง URL ของไฟล์ที่อัปโหลด
         console.log("remoteUrl",remoteUrl);
 
+        // ตรวจสอบว่า taskData.storage มีค่าเป็น ObjectId ที่ถูกต้อง
+        const storageId = new mongoose.Types.ObjectId(taskData.storage);
+        
         // อัปเดตข้อมูลในคอลเลกชัน storage
         const updateResult = await Storage.updateOne(
-          { _id: new mongoose.Types.ObjectId(taskData.storage) }, // ค้นหาตาม ID ของ storage ในรูปแบบ ObjectId
+          { _id: storageId }, // ค้นหาตาม ID ของ storage ในรูปแบบ ObjectId
           { $set: { [`transcode.${taskData.quality}`]: remoteUrl } } // อัปเดตข้อมูลใน storage collection
         );
 
         if (updateResult.nModified === 0) {
-          console.error('No documents were updated. Check if the ID is correct.');
+          console.error('No documents were updated. Check if the ID is correct or if the data is the same.');
         } else {
           console.log('Storage updated successfully.');
         }
-      } catch (uploadError) {
-        console.error('Error uploading to S3:', uploadError);
+      } catch (error) {
+        console.error('Error updating storage:', error);
       }
 
       fs.unlink(inputPath, () => {});
