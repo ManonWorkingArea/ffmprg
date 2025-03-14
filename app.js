@@ -8,6 +8,7 @@ const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 const fs = require('fs'); 
 const mongoose = require('mongoose');
+const ffprobe = require('fluent-ffmpeg').ffprobe;
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -59,7 +60,6 @@ app.post('/convert', upload.single('video'), async (req, res) => {
   let currentQuality = 'unknown';
 
   if (req.file) {
-    // ตรวจสอบว่ามีงานที่มี inputPath เดียวกันอยู่ใน MongoDB หรือไม่
     const existingTask = await Task.findOne({ inputPath: req.file.path });
     if (existingTask) {
       return res.json({ 
@@ -68,13 +68,12 @@ app.post('/convert', upload.single('video'), async (req, res) => {
         fileSize: existingTask.fileSize,
         currentQuality: existingTask.currentQuality,
         preDownloadLink: `${baseUrl}/uploads/${path.basename(existingTask.inputPath)}`
-      }); // คืนค่า taskId ของงานที่มีอยู่
+      });
     }
     taskId = uuidv4();
-    fileSize = req.file.size;
-    currentQuality = 'unknown'; // คุณอาจต้องการเพิ่มการตรวจสอบคุณภาพของไฟล์ต้นฉบับ
+    fileSize = await getFileSize(req.file.path);
+    currentQuality = await getVideoQuality(req.file.path);
   } else if (req.body.url) {
-    // ตรวจสอบว่ามีงานที่มี url เดียวกันอยู่ใน MongoDB หรือไม่
     const existingTask = await Task.findOne({ url: req.body.url });
     if (existingTask) {
       return res.json({ 
@@ -83,10 +82,12 @@ app.post('/convert', upload.single('video'), async (req, res) => {
         fileSize: existingTask.fileSize,
         currentQuality: existingTask.currentQuality,
         preDownloadLink: existingTask.url
-      }); // คืนค่า taskId ของงานที่มีอยู่
+      });
     }
     taskId = uuidv4();
-    // คุณอาจต้องการเพิ่มการตรวจสอบขนาดและคุณภาพของไฟล์จาก URL
+    // คุณอาจต้องการดาวน์โหลดไฟล์เพื่อวิเคราะห์ขนาดและคุณภาพของไฟล์
+    // fileSize = await getFileSize(downloadedFilePath);
+    // currentQuality = await getVideoQuality(downloadedFilePath);
   } else {
     return res.status(400).json({ success: false, error: 'Video file or URL required' });
   }
@@ -103,7 +104,7 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     currentQuality
   };
 
-  await Task.create(taskData); // บันทึกข้อมูลใน MongoDB
+  await Task.create(taskData);
 
   processQueue(taskId, taskData);
 
@@ -114,7 +115,7 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     currentQuality, 
     preDownloadLink: req.file ? `${baseUrl}/uploads/${path.basename(req.file.path)}` : req.body.url,
     downloadLink: `${baseUrl}/outputs/${taskId}-output.mp4` 
-  }); // ส่งลิงก์ดาวน์โหลด
+  });
 });
 
 // Endpoint: Check status and get result
@@ -260,4 +261,31 @@ async function processNextQueue() {
     isProcessing = false; // รีเซ็ตสถานะการประมวลผล
     processNextQueue(); // เรียกใช้ processNextQueue เพื่อประมวลผลงานถัดไป
   }
+}
+
+// ฟังก์ชันเพื่อดึงข้อมูลคุณภาพของไฟล์
+function getVideoQuality(filePath) {
+  return new Promise((resolve, reject) => {
+    ffprobe(filePath, (err, metadata) => {
+      if (err) return reject(err);
+      const videoStream = metadata.streams.find(stream => stream.codec_type === 'video');
+      if (videoStream) {
+        const width = videoStream.width;
+        const height = videoStream.height;
+        resolve(`${width}x${height}`);
+      } else {
+        resolve('unknown');
+      }
+    });
+  });
+}
+
+// ฟังก์ชันเพื่อดึงข้อมูลขนาดของไฟล์
+function getFileSize(filePath) {
+  return new Promise((resolve, reject) => {
+    fs.stat(filePath, (err, stats) => {
+      if (err) return reject(err);
+      resolve(stats.size);
+    });
+  });
 }
