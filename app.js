@@ -259,8 +259,8 @@ async function processQueue(taskId, taskData) {
     endpoint: `${taskData.space.s3EndpointDefault}`, // Include bucket in the endpoint
     region: `${taskData.space.s3Region}`, // DigitalOcean Spaces does not require a specific region
     credentials: {
-      accessKeyId: String(taskData.space.s3Key), // Ensure they are valid strings
-      secretAccessKey: String(taskData.space.s3Secret)
+      accessKeyId: `${taskData.space.s3Key}`, // Ensure they are valid strings
+      secretAccessKey: `${taskData.space.s3Secret}`
     },
     forcePathStyle: false // DigitalOcean Spaces does NOT use path-style addressing
   });
