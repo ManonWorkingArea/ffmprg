@@ -48,7 +48,6 @@ const taskSchema = new mongoose.Schema({
 
 const Task = mongoose.model('Queue', taskSchema);
 
-
 // สร้าง Schema สำหรับ Storage
 const storageSchema = new mongoose.Schema({
   owner: { type: String, required: true }, // เจ้าของ
@@ -258,6 +257,7 @@ async function processQueue(taskId, taskData) {
   const s3Client = new S3({
     endpoint: `${taskData.space.s3EndpointDefault}`, // Include bucket in the endpoint
     region: `${taskData.space.s3Region}`, // DigitalOcean Spaces does not require a specific region
+    ResponseContentEncoding:"utf-8",
     credentials: {
       accessKeyId: `${taskData.space.s3Key}`, // Ensure they are valid strings
       secretAccessKey: `${taskData.space.s3Secret}`
@@ -282,7 +282,7 @@ async function processQueue(taskId, taskData) {
       // อัปโหลดไปยัง S3
       const fileContent = fs.readFileSync(outputPath);
       const params = {
-        Bucket: taskData.space.s3Bucket, // ชื่อ bucket จาก taskData
+        Bucket: `${taskData.space.s3Bucket}`, // ชื่อ bucket จาก taskData
         Key: `outputs/${outputFileName}`, // ชื่อไฟล์ใน S3
         Body: fileContent,
         ACL: 'public-read' // ตั้งค่าสิทธิ์การเข้าถึง
