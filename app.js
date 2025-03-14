@@ -73,8 +73,19 @@ app.post('/convert', upload.single('video'), async (req, res) => {
   } catch (error) {
     return res.status(500).json({ success: false, error: 'Failed to fetch hostname data' });
   }
+
+  console.log(hostnameData);
+
+  try {
+    spaceData = await getSpaceData(hostnameData.hostnameData.spaceId);
+    if (!spaceData) {
+      return res.status(404).json({ success: false, error: 'Hostname not found' });
+    }
+  } catch (error) {
+    return res.status(500).json({ success: false, error: 'Failed to fetch hostname data' });
+  }
   
-  spaceData = await getSpaceData(hostnameData.hostnameData.spaceId);
+  console.log(spaceData);
 
   if (req.file) {
     // Check if an existing task has the same inputPath
