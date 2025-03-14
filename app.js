@@ -259,8 +259,6 @@ async function processQueue(taskId, taskData) {
   taskData.space = spaceData;
   console.log("taskData.space",taskData.space);
 
-  let s3Key = taskData.space.s3Key;
-  let s3Secret = taskData.space.s3Secret;
 
   const s3DataConfig = taskData.space;
 
@@ -313,7 +311,7 @@ async function processQueue(taskId, taskData) {
 
         // อัปเดตข้อมูลในคอลเลกชัน storage
         await Storage.updateOne(
-          { _id: mongoose.Types.ObjectId(taskData.storage) }, // ค้นหาตาม ID ของ storage ในรูปแบบ ObjectId
+          { _id: new mongoose.Types.ObjectId(taskData.storage._id)}, // ค้นหาตาม ID ของ storage ในรูปแบบ ObjectId
           { $set: { [`transcode.${taskData.quality}`]: remoteUrl } } // อัปเดตข้อมูลใน storage collection
         );
 
