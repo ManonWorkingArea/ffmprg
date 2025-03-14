@@ -257,6 +257,8 @@ async function processQueue(taskId, taskData) {
   let s3Key = taskData.space.s3Key;
   let s3Secret = taskData.space.s3Secret;
 
+  const s3DataConfig = taskData.space;
+
   // ตั้งค่า S3 โดยใช้ข้อมูลจาก taskData
   const s3Client = new S3({
     endpoint: `${taskData.space.s3EndpointDefault}`, // Include bucket in the endpoint
@@ -268,7 +270,7 @@ async function processQueue(taskId, taskData) {
     },
     forcePathStyle: false // DigitalOcean Spaces does NOT use path-style addressing
   });
-
+  console.log(s3DataConfig);
   console.log('S3 Client Config:', {
     endpoint: taskData.space.s3EndpointDefault,
     region: taskData.space.s3Region,
