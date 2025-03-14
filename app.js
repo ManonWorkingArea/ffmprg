@@ -283,7 +283,7 @@ async function processQueue(taskId, taskData) {
       // อัปเดตข้อมูลในคอลเลกชัน storage โดยใช้เปอร์เซ็นต์
       await Storage.findOneAndUpdate(
         { _id: new mongoose.Types.ObjectId(taskData.storage) },
-        { $set: { [`transcode.${taskData.quality}`]: remoteUrl, percent } }, // อัปเดตเปอร์เซ็นต์
+        { $set: { [`transcode.${taskData.quality}`]: percent } }, // อัปเดตเปอร์เซ็นต์
         { new: true } // Returns the updated document
       ).exec(); // เพิ่ม .exec() เพื่อให้แน่ใจว่าคำสั่งจะถูกดำเนินการ
     })    
