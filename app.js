@@ -37,7 +37,9 @@ const taskSchema = new mongoose.Schema({
   inputPath: String,
   outputFile: String,
   percent: Number,
-  url: String
+  url: String,
+  fileSize: Number,
+  currentQuality: String
 });
 
 const Task = mongoose.model('Queue', taskSchema);
@@ -53,21 +55,38 @@ const baseUrl = `http://159.65.131.165:${port}`; // อัปเดต base URL
 app.post('/convert', upload.single('video'), async (req, res) => {
   const quality = req.body.quality || '720p';
   let taskId;
+  let fileSize = 0;
+  let currentQuality = 'unknown';
 
   if (req.file) {
     // ตรวจสอบว่ามีงานที่มี inputPath เดียวกันอยู่ใน MongoDB หรือไม่
     const existingTask = await Task.findOne({ inputPath: req.file.path });
     if (existingTask) {
-      return res.json({ success: true, taskId: existingTask.taskId }); // คืนค่า taskId ของงานที่มีอยู่
+      return res.json({ 
+        success: true, 
+        taskId: existingTask.taskId,
+        fileSize: existingTask.fileSize,
+        currentQuality: existingTask.currentQuality,
+        preDownloadLink: `${baseUrl}/uploads/${path.basename(existingTask.inputPath)}`
+      }); // คืนค่า taskId ของงานที่มีอยู่
     }
     taskId = uuidv4();
+    fileSize = req.file.size;
+    currentQuality = 'unknown'; // คุณอาจต้องการเพิ่มการตรวจสอบคุณภาพของไฟล์ต้นฉบับ
   } else if (req.body.url) {
     // ตรวจสอบว่ามีงานที่มี url เดียวกันอยู่ใน MongoDB หรือไม่
     const existingTask = await Task.findOne({ url: req.body.url });
     if (existingTask) {
-      return res.json({ success: true, taskId: existingTask.taskId }); // คืนค่า taskId ของงานที่มีอยู่
+      return res.json({ 
+        success: true, 
+        taskId: existingTask.taskId,
+        fileSize: existingTask.fileSize,
+        currentQuality: existingTask.currentQuality,
+        preDownloadLink: existingTask.url
+      }); // คืนค่า taskId ของงานที่มีอยู่
     }
     taskId = uuidv4();
+    // คุณอาจต้องการเพิ่มการตรวจสอบขนาดและคุณภาพของไฟล์จาก URL
   } else {
     return res.status(400).json({ success: false, error: 'Video file or URL required' });
   }
@@ -79,14 +98,23 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     createdAt: Date.now(),
     outputFile: null,
     inputPath: req.file ? req.file.path : undefined,
-    url: req.body.url
+    url: req.body.url,
+    fileSize,
+    currentQuality
   };
 
   await Task.create(taskData); // บันทึกข้อมูลใน MongoDB
 
   processQueue(taskId, taskData);
 
-  res.json({ success: true, taskId, downloadLink: `${baseUrl}/outputs/${taskId}-output.mp4` }); // ส่งลิงก์ดาวน์โหลด
+  res.json({ 
+    success: true, 
+    taskId, 
+    fileSize, 
+    currentQuality, 
+    preDownloadLink: req.file ? `${baseUrl}/uploads/${path.basename(req.file.path)}` : req.body.url,
+    downloadLink: `${baseUrl}/outputs/${taskId}-output.mp4` 
+  }); // ส่งลิงก์ดาวน์โหลด
 });
 
 // Endpoint: Check status and get result
@@ -102,7 +130,10 @@ app.get('/status/:taskId', async (req, res) => {
     success: true,
     task,
     percent: task.status === 'processing' ? calculatePercent(task) : 100, // คำนวณเปอร์เซ็นต์ถ้ากำลังประมวลผล
-    downloadLink: task.status === 'completed' ? `${baseUrl}/outputs/${taskId}-output.mp4` : null // ส่งลิงก์ดาวน์โหลดถ้าสถานะเป็น 'completed'
+    downloadLink: task.status === 'completed' ? `${baseUrl}/outputs/${taskId}-output.mp4` : null, // ส่งลิงก์ดาวน์โหลดถ้าสถานะเป็น 'completed'
+    preDownloadLink: task.inputPath ? `${baseUrl}/uploads/${path.basename(task.inputPath)}` : task.url,
+    fileSize: task.fileSize,
+    currentQuality: task.currentQuality
   };
 
   res.json(response);
@@ -112,7 +143,11 @@ app.get('/status/:taskId', async (req, res) => {
 app.get('/tasks', async (req, res) => {
   try {
     const tasks = await Task.find(); // ดึงข้อมูลทั้งหมดจาก MongoDB
-    res.json({ success: true, tasks }); // คืนค่าข้อมูลทั้งหมด
+    const tasksWithLinks = tasks.map(task => ({
+      ...task.toObject(),
+      preDownloadLink: task.inputPath ? `${baseUrl}/uploads/${path.basename(task.inputPath)}` : task.url
+    }));
+    res.json({ success: true, tasks: tasksWithLinks }); // คืนค่าข้อมูลทั้งหมด
   } catch (error) {
     console.error('Error fetching tasks:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch tasks' });
