@@ -8,7 +8,7 @@ const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 const fs = require('fs'); 
 const mongoose = require('mongoose');
-const AWS = require('aws-sdk');
+const { S3 } = require('@aws-sdk/client-s3');
 
 const { getHostnameData,getSpaceData } = require('./middleware/hostname'); // Import the function
 
@@ -255,10 +255,8 @@ async function processQueue(taskId, taskData) {
   await Task.updateOne({ taskId }, { status: 'processing' }); // อัปเดตสถานะใน MongoDB
 
   // ตั้งค่า S3 โดยใช้ข้อมูลจาก taskData
-  const s3 = new AWS.S3({
+  const s3 = new S3({
     endpoint: taskData.space.s3Endpoint, // ใช้ endpoint จาก taskData
-    accessKeyId: taskData.space.s3Key, // คีย์ที่เข้าถึงจาก taskData
-    secretAccessKey: taskData.space.s3Secret, // รหัสลับจาก taskData
     region: taskData.space.s3Region // ระบุภูมิภาคจาก taskData
   });
 
@@ -285,8 +283,8 @@ async function processQueue(taskId, taskData) {
       };
 
       try {
-        const uploadResult = await s3.upload(params).promise(); // อัปโหลดไฟล์
-        const remoteUrl = uploadResult.Location; // รับ URL ของไฟล์ที่อัปโหลด
+        const uploadResult = await s3.putObject(params); // เปลี่ยนเป็นใช้ putObject
+        const remoteUrl = `${taskData.space.s3Endpoint}/outputs/${outputFileName}`; // สร้าง URL ของไฟล์ที่อัปโหลด
 
         // อัปเดตข้อมูลในคอลเลกชัน storage
         await Storage.updateOne(
