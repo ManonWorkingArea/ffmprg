@@ -119,7 +119,7 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     url: req.body.url,
     site: hostnameData, // Store hostname reference
     space: spaceData, // Store spaceId for future processing
-    storage: req.body.url.storage
+    storage: req.body.storage
   };
 
   await Task.create(taskData); // Save to MongoDB
