@@ -41,7 +41,8 @@ const taskSchema = new mongoose.Schema({
   percent: Number,
   url: String,
   site: Object,
-  space: Object
+  space: Object,
+  storage: String
 });
 
 const Task = mongoose.model('Queue', taskSchema);
@@ -118,6 +119,7 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     url: req.body.url,
     site: hostnameData, // Store hostname reference
     space: spaceData, // Store spaceId for future processing
+    storage: req.body.url.storage
   };
 
   await Task.create(taskData); // Save to MongoDB
