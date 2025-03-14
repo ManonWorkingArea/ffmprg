@@ -256,7 +256,7 @@ async function processQueue(taskId, taskData) {
   console.log(taskData.space);
   // ตั้งค่า S3 โดยใช้ข้อมูลจาก taskData
   const s3Client = new S3({
-    endpoint: `${taskData.space.s3Endpoint}`, // Include bucket in the endpoint
+    endpoint: `${taskData.space.s3EndpointDefault}`, // Include bucket in the endpoint
     region: `${taskData.space.s3Region}`, // DigitalOcean Spaces does not require a specific region
     credentials: {
       accessKeyId: String(taskData.space.s3Key), // Ensure they are valid strings
