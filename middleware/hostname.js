@@ -2,12 +2,13 @@ const mongoose = require('mongoose');
 
 // Define Hostname schema and model
 const hostnameSchema = new mongoose.Schema({
-  hostname: String,
-  siteName: String,
-  spaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Space' } // Reference to Space collection
-});
-
-const Hostname = mongoose.model('Hostname', hostnameSchema);
+    hostname: String,
+    siteName: String,
+    spaceId: String // Change to String instead of ObjectId reference
+  });
+  
+  // Specify the collection name explicitly
+  const Hostname = mongoose.model('hostname', hostnameSchema, 'hostname'); // Specify collection name as 'hostname'
 
 // Define Space schema and model
 const spaceSchema = new mongoose.Schema({
@@ -23,7 +24,7 @@ const spaceSchema = new mongoose.Schema({
   size: Number
 });
 
-const Space = mongoose.model('Space', spaceSchema);
+const Space = mongoose.model('space', spaceSchema, 'space'); // Specify collection name as 'hostname'
 
 /**
  * Fetch hostname data and join with space data
@@ -34,7 +35,7 @@ const getHostnameData = async (site) => {
   if (!site) {
     throw new Error('Site is required');
   }
-
+  console.log(site);
   try {
     const hostnameData = await Hostname.findOne({ hostname: site })
       .select('hostname siteName spaceId') // Select only required fields
@@ -44,11 +45,36 @@ const getHostnameData = async (site) => {
       return null; // Return null if no data found
     }
 
-    return hostnameData;
+    return { hostnameData, spaceData: hostnameData.spaceId }; // คืนค่าข้อมูล hostname พร้อมข้อมูล space
   } catch (error) {
     console.error('Error fetching hostname data:', error);
     throw new Error('Failed to fetch hostname data');
   }
 };
 
-module.exports = { getHostnameData };
+/**
+ * Fetch space data by spaceId
+ * @param {String} spaceId - The ID of the space to search for
+ * @returns {Object} - Space data
+ */
+const getSpaceData = async (spaceId) => {
+  if (!spaceId) {
+    throw new Error('Space ID is required');
+  }
+  console.log('Fetching space data for spaceId:', spaceId); // เพิ่มการบันทึกเพื่อดีบัก
+  try {
+    const spaceData = await Space.findOne({_id: new mongoose.Types.ObjectId(spaceId)}); // ใช้ new เพื่อสร้าง ObjectId
+
+    if (!spaceData) {
+      console.warn('No space data found for spaceId:', spaceId); // เพิ่มการบันทึกเมื่อไม่พบข้อมูล
+      return null; // คืนค่า null หากไม่พบข้อมูล
+    }
+
+    return spaceData; // คืนค่าข้อมูล space
+  } catch (error) {
+    console.error('Error fetching space data:', error);
+    throw new Error('Failed to fetch space data');
+  }
+};
+
+module.exports = { getHostnameData, getSpaceData };

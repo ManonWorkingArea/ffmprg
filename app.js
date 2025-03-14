@@ -9,7 +9,7 @@ const axios = require('axios');
 const fs = require('fs'); 
 const mongoose = require('mongoose');
 
-const { getHostnameData } = require('./middleware/hostname'); // Import the function
+const { getHostnameData,getSpaceData } = require('./middleware/hostname'); // Import the function
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -64,6 +64,7 @@ app.post('/convert', upload.single('video'), async (req, res) => {
 
   // Fetch hostname data
   let hostnameData;
+  let spaceData;
   try {
     hostnameData = await getHostnameData(site);
     if (!hostnameData) {
@@ -72,6 +73,8 @@ app.post('/convert', upload.single('video'), async (req, res) => {
   } catch (error) {
     return res.status(500).json({ success: false, error: 'Failed to fetch hostname data' });
   }
+  
+  spaceData = await getSpaceData(hostnameData.hostnameData.spaceId);
 
   if (req.file) {
     // Check if an existing task has the same inputPath
@@ -100,8 +103,8 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     outputFile: null,
     inputPath: req.file ? req.file.path : undefined,
     url: req.body.url,
-    site: hostnameData.hostname, // Store hostname reference
-    spaceId: hostnameData.spaceId, // Store spaceId for future processing
+    site: hostnameData, // Store hostname reference
+    space: spaceData, // Store spaceId for future processing
   };
 
   await Task.create(taskData); // Save to MongoDB
