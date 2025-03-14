@@ -316,7 +316,7 @@ async function processQueue(taskId, taskData) {
           { _id: new mongoose.Types.ObjectId(taskData.storage) },
           { $set: { [`transcode.${taskData.quality}`]: remoteUrl } },
           { new: true } // Returns the updated document
-        );
+        ).exec(); // เพิ่ม .exec() เพื่อให้แน่ใจว่าคำสั่งจะถูกดำเนินการ
         
         console.log("Updated Storage Document:", updatedDoc);
         
