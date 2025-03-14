@@ -253,17 +253,16 @@ async function processQueue(taskId, taskData) {
   }
 
   await Task.updateOne({ taskId }, { status: 'processing' }); // อัปเดตสถานะใน MongoDB
-
+  console.log(taskData.space);
   // ตั้งค่า S3 โดยใช้ข้อมูลจาก taskData
   const s3Client = new S3({
-    forcePathStyle: false,
     endpoint: taskData.space.s3Endpoint, // ใช้ endpoint จาก taskData
     region: taskData.space.s3Region, // ระบุภูมิภาคจาก taskData
-    ResponseContentEncoding: "utf-8",
     credentials: {
       accessKeyId: taskData.space.s3Key, // ใช้ accessKeyId จาก taskData
       secretAccessKey: taskData.space.s3Secret // ใช้ secretAccessKey จาก taskData
-    }
+    },
+    forcePathStyle: true // ตั้งค่าเป็น true สำหรับ DigitalOcean Spaces
   });
 
   // เริ่มกระบวนการ ffmpeg
