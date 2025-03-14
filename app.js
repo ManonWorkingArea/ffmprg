@@ -49,11 +49,10 @@ let isProcessing = false; // ตัวแปรเพื่อบอกสถา
 
 const baseUrl = `http://159.65.131.165:${port}`; // อัปเดต base URL
 
-
 // Grouped Endpoints
 
 // Endpoint: Add conversion task to queue
-router.post('/convert', upload.single('video'), async (req, res) => {
+app.post('/convert', upload.single('video'), async (req, res) => {
   const quality = req.body.quality || '720p';
   const site = req.body.site; // Get the site from the request body
   let taskId;
