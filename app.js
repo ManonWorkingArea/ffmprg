@@ -254,11 +254,24 @@ async function processQueue(taskId, taskData) {
   await Task.updateOne({ taskId }, { status: 'processing' }); // อัปเดตสถานะใน MongoDB
   console.log(taskData.space);
 
+  
+
   let accessKeyId = taskData.space.s3Key;
   let secretAccessKey = taskData.space.s3Secret;
   let endpoint = taskData.space.s3EndpointDefault;
   let region = taskData.space.s3Region;
   let bucket = taskData.space.s3Bucket;
+
+
+  taskData.space = new Proxy(taskData.space, {
+    set(target, property, value) {
+      console.trace(`Modification detected: ${property} = ${value}`);
+      target[property] = value;
+      return true;
+    }
+  });
+
+  
   // ตั้งค่า S3 โดยใช้ข้อมูลจาก taskData
   const s3Client = new S3({
     endpoint: `${taskData.space.s3EndpointDefault}`, // Include bucket in the endpoint
