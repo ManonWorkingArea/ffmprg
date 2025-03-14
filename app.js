@@ -265,17 +265,18 @@ async function processQueue(taskId, taskData) {
     region: `${taskData.space.s3Region}`, // DigitalOcean Spaces does not require a specific region
     ResponseContentEncoding:"utf-8",
     credentials: {
-      accessKeyId: s3Key, // Ensure they are valid strings
-      secretAccessKey: s3Secret
+      accessKeyId: s3DataConfig.s3Key, // Ensure they are valid strings
+      secretAccessKey: s3DataConfig.s3Secret
     },
     forcePathStyle: false // DigitalOcean Spaces does NOT use path-style addressing
   });
-  console.log(s3DataConfig);
+  console.log("S3 Data Config:",s3DataConfig);
+
   console.log('S3 Client Config:', {
     endpoint: taskData.space.s3EndpointDefault,
     region: taskData.space.s3Region,
-    accessKeyId: taskData.space.s3Key,
-    secretAccessKey: taskData.space.s3Secret,
+    accessKeyId: s3DataConfig.s3Key,
+    secretAccessKey: s3DataConfig.s3Secret,
     bucket: taskData.space.s3Bucket
   });
 
