@@ -8,6 +8,7 @@ const { v4: uuidv4 } = require('uuid');
 const axios = require('axios');
 const fs = require('fs'); 
 const mongoose = require('mongoose');
+const AWS = require('aws-sdk');
 
 const { getHostnameData,getSpaceData } = require('./middleware/hostname'); // Import the function
 
@@ -46,6 +47,27 @@ const taskSchema = new mongoose.Schema({
 });
 
 const Task = mongoose.model('Queue', taskSchema);
+
+
+// สร้าง Schema สำหรับ Storage
+const storageSchema = new mongoose.Schema({
+  owner: { type: String, required: true }, // เจ้าของ
+  original: { type: String, required: true }, // ชื่อไฟล์ต้นฉบับ
+  path: { type: String, required: true }, // URL ของไฟล์
+  parent: { type: String, default: '' }, // ID ของ parent
+  name: { type: String, required: true }, // ชื่อไฟล์
+  size: { type: Number, required: true }, // ขนาดไฟล์
+  type: { type: String, required: true }, // ประเภทไฟล์
+  mimetype: { type: String, required: true }, // MIME type
+  spaceId: { type: String, required: true }, // ID ของพื้นที่
+  createdAt: { type: Date, default: Date.now }, // วันที่สร้าง
+  updatedAt: { type: Date, default: Date.now }, // วันที่อัปเดต
+  duration: { type: Number, default: 0 }, // ระยะเวลา (สำหรับไฟล์มีเดีย)
+  thumbnail: { type: String, default: '' } // URL ของ thumbnail
+});
+
+// สร้างโมเดล Storage
+const Storage = mongoose.model('storage', storageSchema, 'storage'); // Specify collection name as 'hostname'
 
 let ffmpegProcesses = {}; // เก็บข้อมูลเกี่ยวกับกระบวนการ ffmpeg
 let isProcessing = false; // ตัวแปรเพื่อบอกสถานะการประมวลผล
@@ -232,6 +254,14 @@ async function processQueue(taskId, taskData) {
 
   await Task.updateOne({ taskId }, { status: 'processing' }); // อัปเดตสถานะใน MongoDB
 
+  // ตั้งค่า S3 โดยใช้ข้อมูลจาก taskData
+  const s3 = new AWS.S3({
+    endpoint: taskData.space.s3Endpoint, // ใช้ endpoint จาก taskData
+    accessKeyId: taskData.space.s3Key, // คีย์ที่เข้าถึงจาก taskData
+    secretAccessKey: taskData.space.s3Secret, // รหัสลับจาก taskData
+    region: taskData.space.s3Region // ระบุภูมิภาคจาก taskData
+  });
+
   // เริ่มกระบวนการ ffmpeg
   ffmpegProcesses[taskId] = ffmpeg(inputPath)
     .size(videoSize)
@@ -244,6 +274,30 @@ async function processQueue(taskId, taskData) {
     .on('end', async () => {
       delete ffmpegProcesses[taskId]; // ลบกระบวนการเมื่อเสร็จสิ้น
       await Task.updateOne({ taskId }, { status: 'completed', outputFile: `/${outputFileName}` });
+      
+      // อัปโหลดไปยัง S3
+      const fileContent = fs.readFileSync(outputPath);
+      const params = {
+        Bucket: taskData.space.s3Bucket, // ชื่อ bucket จาก taskData
+        Key: `outputs/${outputFileName}`, // ชื่อไฟล์ใน S3
+        Body: fileContent,
+        ACL: 'public-read' // ตั้งค่าสิทธิ์การเข้าถึง
+      };
+
+      try {
+        const uploadResult = await s3.upload(params).promise(); // อัปโหลดไฟล์
+        const remoteUrl = uploadResult.Location; // รับ URL ของไฟล์ที่อัปโหลด
+
+        // อัปเดตข้อมูลในคอลเลกชัน storage
+        await Storage.updateOne(
+          { _id: mongoose.Types.ObjectId(taskData.storage) }, // ค้นหาตาม ID ของ storage ในรูปแบบ ObjectId
+          { $set: { [`transcode.${taskData.quality}`]: remoteUrl } } // อัปเดตข้อมูลใน storage collection
+        );
+
+      } catch (uploadError) {
+        console.error('Error uploading to S3:', uploadError);
+      }
+
       fs.unlink(inputPath, () => {});
       processNextQueue(); // เรียกใช้ processNextQueue เพื่อประมวลผลงานถัดไป
     })
@@ -272,3 +326,4 @@ async function processNextQueue() {
     processNextQueue(); // เรียกใช้ processNextQueue เพื่อประมวลผลงานถัดไป
   }
 }
+
