@@ -39,7 +39,9 @@ const taskSchema = new mongoose.Schema({
   inputPath: String,
   outputFile: String,
   percent: Number,
-  url: String
+  url: String,
+  site: Object,
+  space: Object
 });
 
 const Task = mongoose.model('Queue', taskSchema);
