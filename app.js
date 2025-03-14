@@ -255,7 +255,7 @@ async function processQueue(taskId, taskData) {
   console.log(taskData.space);
   
 
-  const spaceData = JSON.parse(JSON.stringify(await getSpaceData(hostnameData.spaceId)));
+  const spaceData = JSON.parse(JSON.stringify(await getSpaceData(taskData.site.spaceId)));
   taskData.space = spaceData;
   console.log("taskData.space",taskData.space);
 
