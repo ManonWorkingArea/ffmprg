@@ -255,9 +255,15 @@ async function processQueue(taskId, taskData) {
   await Task.updateOne({ taskId }, { status: 'processing' }); // อัปเดตสถานะใน MongoDB
 
   // ตั้งค่า S3 โดยใช้ข้อมูลจาก taskData
-  const s3 = new S3({
+  const s3Client = new S3({
+    forcePathStyle: false,
     endpoint: taskData.space.s3Endpoint, // ใช้ endpoint จาก taskData
-    region: taskData.space.s3Region // ระบุภูมิภาคจาก taskData
+    region: taskData.space.s3Region, // ระบุภูมิภาคจาก taskData
+    ResponseContentEncoding: "utf-8",
+    credentials: {
+      accessKeyId: taskData.space.s3Key, // ใช้ accessKeyId จาก taskData
+      secretAccessKey: taskData.space.s3Secret // ใช้ secretAccessKey จาก taskData
+    }
   });
 
   // เริ่มกระบวนการ ffmpeg
@@ -283,7 +289,7 @@ async function processQueue(taskId, taskData) {
       };
 
       try {
-        const uploadResult = await s3.putObject(params); // เปลี่ยนเป็นใช้ putObject
+        const uploadResult = await s3Client.putObject(params); // เปลี่ยนเป็นใช้ putObject
         const remoteUrl = `${taskData.space.s3Endpoint}/outputs/${outputFileName}`; // สร้าง URL ของไฟล์ที่อัปโหลด
 
         // อัปเดตข้อมูลในคอลเลกชัน storage
