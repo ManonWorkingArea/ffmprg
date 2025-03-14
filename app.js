@@ -311,7 +311,7 @@ async function processQueue(taskId, taskData) {
 
         // อัปเดตข้อมูลในคอลเลกชัน storage
         await Storage.updateOne(
-          { _id: new mongoose.Types.ObjectId(taskData.storage._id)}, // ค้นหาตาม ID ของ storage ในรูปแบบ ObjectId
+          { _id: new mongoose.Types.ObjectId(taskData.storage)}, // ค้นหาตาม ID ของ storage ในรูปแบบ ObjectId
           { $set: { [`transcode.${taskData.quality}`]: remoteUrl } } // อัปเดตข้อมูลใน storage collection
         );
 
