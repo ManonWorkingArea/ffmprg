@@ -291,7 +291,7 @@ async function processQueue(taskId, taskData) {
     .on('progress', async (progress) => {
       const percent = Math.round(progress.percent);
       await Task.updateOne({ taskId }, { status: 'processing', percent });
-    })
+    })    
     .on('end', async () => {
       delete ffmpegProcesses[taskId]; // ลบกระบวนการเมื่อเสร็จสิ้น
       await Task.updateOne({ taskId }, { status: 'completed', outputFile: `/${outputFileName}` });
