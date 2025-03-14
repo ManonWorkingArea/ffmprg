@@ -256,8 +256,8 @@ async function processQueue(taskId, taskData) {
 
   
 
-  let accessKeyId = taskData.space.s3Key;
-  let secretAccessKey = taskData.space.s3Secret;
+  let s3Key = taskData.space.s3Key;
+  let s3Secret = taskData.space.s3Secret;
   let endpoint = taskData.space.s3EndpointDefault;
   let region = taskData.space.s3Region;
   let bucket = taskData.space.s3Bucket;
@@ -271,15 +271,15 @@ async function processQueue(taskId, taskData) {
     }
   });
 
-  
+
   // ตั้งค่า S3 โดยใช้ข้อมูลจาก taskData
   const s3Client = new S3({
     endpoint: `${taskData.space.s3EndpointDefault}`, // Include bucket in the endpoint
     region: `${taskData.space.s3Region}`, // DigitalOcean Spaces does not require a specific region
     ResponseContentEncoding:"utf-8",
     credentials: {
-      accessKeyId: `${taskData.space.s3Key}`, // Ensure they are valid strings
-      secretAccessKey: `${taskData.space.s3Secret}`
+      accessKeyId: `${s3Key}`, // Ensure they are valid strings
+      secretAccessKey: `${s3Secret}`
     },
     forcePathStyle: false // DigitalOcean Spaces does NOT use path-style addressing
   });
@@ -287,8 +287,8 @@ async function processQueue(taskId, taskData) {
   console.log('S3 Client Config:', {
     endpoint: taskData.space.s3EndpointDefault,
     region: taskData.space.s3Region,
-    accessKeyId: accessKeyId,
-    secretAccessKey: secretAccessKey,
+    accessKeyId: s3Key,
+    secretAccessKey: s3Secret,
     bucket: taskData.space.s3Bucket
   });
 
