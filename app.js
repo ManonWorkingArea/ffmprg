@@ -10,7 +10,7 @@ const fs = require('fs');
 const mongoose = require('mongoose');
 const { S3 } = require('@aws-sdk/client-s3');
 
-const { getHostnameData,getSpaceData } = require('./middleware/hostname'); // Import the function
+const { getHostnameData, getSpaceData } = require('./middleware/hostname'); // Import the function
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -253,13 +253,9 @@ async function processQueue(taskId, taskData) {
   }
 
   await Task.updateOne({ taskId }, { status: 'processing' }); // อัปเดตสถานะใน MongoDB
-  console.log(taskData.space);
-  
 
   const spaceData = JSON.parse(JSON.stringify(await getSpaceData(taskData.site.spaceId)));
   taskData.space = spaceData;
-  console.log("taskData.space",taskData.space);
-
 
   const s3DataConfig = taskData.space;
 
@@ -267,21 +263,12 @@ async function processQueue(taskId, taskData) {
   const s3Client = new S3({
     endpoint: `${taskData.space.s3EndpointDefault}`, // Include bucket in the endpoint
     region: `${taskData.space.s3Region}`, // DigitalOcean Spaces does not require a specific region
-    ResponseContentEncoding:"utf-8",
+    ResponseContentEncoding: "utf-8",
     credentials: {
       accessKeyId: s3DataConfig.s3Key, // Ensure they are valid strings
       secretAccessKey: s3DataConfig.s3Secret
     },
     forcePathStyle: false // DigitalOcean Spaces does NOT use path-style addressing
-  });
-  console.log("S3 Data Config:",s3DataConfig);
-
-  console.log('S3 Client Config:', {
-    endpoint: taskData.space.s3EndpointDefault,
-    region: taskData.space.s3Region,
-    accessKeyId: s3DataConfig.s3Key,
-    secretAccessKey: s3DataConfig.s3Secret,
-    bucket: taskData.space.s3Bucket
   });
 
   // เริ่มกระบวนการ ffmpeg
@@ -308,9 +295,7 @@ async function processQueue(taskId, taskData) {
 
       try {
         const uploadResult = await s3Client.putObject(params); // เปลี่ยนเป็นใช้ putObject
-        console.log("uploadResult",uploadResult);
         const remoteUrl = `${taskData.space.s3Endpoint}outputs/${outputFileName}`; // สร้าง URL ของไฟล์ที่อัปโหลด
-        console.log("remoteUrl",remoteUrl);
 
         // อัปเดตข้อมูลในคอลเลกชัน storage
         const updatedDoc = await Storage.findOneAndUpdate(
@@ -318,9 +303,7 @@ async function processQueue(taskId, taskData) {
           { $set: { [`transcode.${taskData.quality}`]: remoteUrl } },
           { new: true } // Returns the updated document
         ).exec(); // เพิ่ม .exec() เพื่อให้แน่ใจว่าคำสั่งจะถูกดำเนินการ
-        
-        console.log("Updated Storage Document:", updatedDoc);
-        
+
         console.log("Storage updated");
       } catch (uploadError) {
         console.error('Error uploading to S3:', uploadError);
