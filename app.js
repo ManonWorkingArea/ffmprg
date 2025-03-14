@@ -77,14 +77,14 @@ app.post('/convert', upload.single('video'), async (req, res) => {
   console.log(hostnameData);
 
   try {
-    spaceData = await getSpaceData(hostnameData.hostnameData.spaceId);
+    spaceData = await getSpaceData(hostnameData.spaceId);
     if (!spaceData) {
       return res.status(404).json({ success: false, error: 'Hostname not found' });
     }
   } catch (error) {
     return res.status(500).json({ success: false, error: 'Failed to fetch hostname data' });
   }
-  
+
   console.log(spaceData);
 
   if (req.file) {

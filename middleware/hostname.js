@@ -45,7 +45,7 @@ const getHostnameData = async (site) => {
       return null; // Return null if no data found
     }
 
-    return { hostnameData, spaceData: hostnameData.spaceId }; // คืนค่าข้อมูล hostname พร้อมข้อมูล space
+    return hostnameData; // คืนค่าข้อมูล hostname พร้อมข้อมูล space
   } catch (error) {
     console.error('Error fetching hostname data:', error);
     throw new Error('Failed to fetch hostname data');
