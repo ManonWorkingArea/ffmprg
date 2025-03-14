@@ -264,8 +264,15 @@ async function processQueue(taskId, taskData) {
     },
     forcePathStyle: false // DigitalOcean Spaces does NOT use path-style addressing
   });
-  
 
+  console.log('S3 Client Config:', {
+    endpoint: taskData.space.s3EndpointDefault,
+    region: taskData.space.s3Region,
+    accessKeyId: taskData.space.s3Key,
+    secretAccessKey: taskData.space.s3Secret,
+    bucket: taskData.space.s3Bucket
+  });
+  
   // เริ่มกระบวนการ ffmpeg
   ffmpegProcesses[taskId] = ffmpeg(inputPath)
     .size(videoSize)
