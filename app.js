@@ -256,14 +256,15 @@ async function processQueue(taskId, taskData) {
   console.log(taskData.space);
   // ตั้งค่า S3 โดยใช้ข้อมูลจาก taskData
   const s3Client = new S3({
-    endpoint: taskData.space.s3Endpoint, // ใช้ endpoint จาก taskData
-    region: taskData.space.s3Region, // ระบุภูมิภาคจาก taskData
+    endpoint: `https://${taskData.space.s3Bucket}.${taskData.space.s3Endpoint}`, // Include bucket in the endpoint
+    region: "auto", // DigitalOcean Spaces does not require a specific region
     credentials: {
-      accessKeyId: taskData.space.s3Key, // ใช้ accessKeyId จาก taskData
-      secretAccessKey: taskData.space.s3Secret // ใช้ secretAccessKey จาก taskData
+      accessKeyId: String(taskData.space.s3Key), // Ensure they are valid strings
+      secretAccessKey: String(taskData.space.s3Secret)
     },
-    forcePathStyle: true // ตั้งค่าเป็น true สำหรับ DigitalOcean Spaces
+    forcePathStyle: false // DigitalOcean Spaces does NOT use path-style addressing
   });
+  
 
   // เริ่มกระบวนการ ffmpeg
   ffmpegProcesses[taskId] = ffmpeg(inputPath)
