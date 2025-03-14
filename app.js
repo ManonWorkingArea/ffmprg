@@ -9,6 +9,8 @@ const axios = require('axios');
 const fs = require('fs'); 
 const mongoose = require('mongoose');
 
+const { getHostnameData } = require('./middleware/hostname'); // Import the function
+
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -47,31 +49,50 @@ let isProcessing = false; // ตัวแปรเพื่อบอกสถา
 
 const baseUrl = `http://159.65.131.165:${port}`; // อัปเดต base URL
 
+
 // Grouped Endpoints
 
 // Endpoint: Add conversion task to queue
-app.post('/convert', upload.single('video'), async (req, res) => {
+router.post('/convert', upload.single('video'), async (req, res) => {
   const quality = req.body.quality || '720p';
+  const site = req.body.site; // Get the site from the request body
   let taskId;
 
+  // Validate if site is provided
+  if (!site) {
+    return res.status(400).json({ success: false, error: 'Site is required' });
+  }
+
+  // Fetch hostname data
+  let hostnameData;
+  try {
+    hostnameData = await getHostnameData(site);
+    if (!hostnameData) {
+      return res.status(404).json({ success: false, error: 'Hostname not found' });
+    }
+  } catch (error) {
+    return res.status(500).json({ success: false, error: 'Failed to fetch hostname data' });
+  }
+
   if (req.file) {
-    // ตรวจสอบว่ามีงานที่มี inputPath เดียวกันอยู่ใน MongoDB หรือไม่
+    // Check if an existing task has the same inputPath
     const existingTask = await Task.findOne({ inputPath: req.file.path });
     if (existingTask) {
-      return res.json({ success: true, taskId: existingTask.taskId }); // คืนค่า taskId ของงานที่มีอยู่
+      return res.json({ success: true, taskId: existingTask.taskId });
     }
     taskId = uuidv4();
   } else if (req.body.url) {
-    // ตรวจสอบว่ามีงานที่มี url เดียวกันอยู่ใน MongoDB หรือไม่
+    // Check if an existing task has the same URL
     const existingTask = await Task.findOne({ url: req.body.url });
     if (existingTask) {
-      return res.json({ success: true, taskId: existingTask.taskId }); // คืนค่า taskId ของงานที่มีอยู่
+      return res.json({ success: true, taskId: existingTask.taskId });
     }
     taskId = uuidv4();
   } else {
     return res.status(400).json({ success: false, error: 'Video file or URL required' });
   }
 
+  // Construct task data with hostname reference
   const taskData = {
     taskId,
     status: 'queued',
@@ -79,14 +100,22 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     createdAt: Date.now(),
     outputFile: null,
     inputPath: req.file ? req.file.path : undefined,
-    url: req.body.url
+    url: req.body.url,
+    site: hostnameData.hostname, // Store hostname reference
+    spaceId: hostnameData.spaceId, // Store spaceId for future processing
   };
 
-  await Task.create(taskData); // บันทึกข้อมูลใน MongoDB
+  await Task.create(taskData); // Save to MongoDB
 
   processQueue(taskId, taskData);
 
-  res.json({ success: true, taskId, downloadLink: `${baseUrl}/outputs/${taskId}-output.mp4` }); // ส่งลิงก์ดาวน์โหลด
+  res.json({ 
+    success: true, 
+    taskId, 
+    downloadLink: `${baseUrl}/outputs/${taskId}-output.mp4`,
+    site: hostnameData.hostname,
+    spaceId: hostnameData.spaceId 
+  });
 });
 
 // Endpoint: Check status and get result
