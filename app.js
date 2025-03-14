@@ -253,6 +253,12 @@ async function processQueue(taskId, taskData) {
 
   await Task.updateOne({ taskId }, { status: 'processing' }); // อัปเดตสถานะใน MongoDB
   console.log(taskData.space);
+
+  let accessKeyId = taskData.space.s3Key;
+  let secretAccessKey = taskData.space.s3Secret;
+  let endpoint = taskData.space.s3EndpointDefault;
+  let region = taskData.space.s3Region;
+  let bucket = taskData.space.s3Bucket;
   // ตั้งค่า S3 โดยใช้ข้อมูลจาก taskData
   const s3Client = new S3({
     endpoint: `${taskData.space.s3EndpointDefault}`, // Include bucket in the endpoint
@@ -268,11 +274,11 @@ async function processQueue(taskId, taskData) {
   console.log('S3 Client Config:', {
     endpoint: taskData.space.s3EndpointDefault,
     region: taskData.space.s3Region,
-    accessKeyId: taskData.space.s3Key,
-    secretAccessKey: taskData.space.s3Secret,
+    accessKeyId: accessKeyId,
+    secretAccessKey: secretAccessKey,
     bucket: taskData.space.s3Bucket
   });
-  
+
   // เริ่มกระบวนการ ffmpeg
   ffmpegProcesses[taskId] = ffmpeg(inputPath)
     .size(videoSize)
