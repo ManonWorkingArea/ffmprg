@@ -126,8 +126,8 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     success: true, 
     taskId, 
     downloadLink: `${baseUrl}/outputs/${taskId}-output.mp4`,
-    site: hostnameData.hostname,
-    spaceId: hostnameData.spaceId 
+    site: hostnameData, // Store hostname reference
+    space: spaceData, // Store spaceId for future processing
   });
 });
 
