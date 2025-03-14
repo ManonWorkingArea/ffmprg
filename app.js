@@ -265,7 +265,7 @@ async function processQueue(taskId, taskData) {
 
   taskData.space = new Proxy(taskData.space, {
     set(target, property, value) {
-      console.trace(`Modification detected: ${property} = ${value}`);
+      console.log(`Modification detected: ${property} = ${value}`);
       target[property] = value;
       return true;
     }
@@ -278,8 +278,8 @@ async function processQueue(taskId, taskData) {
     region: `${taskData.space.s3Region}`, // DigitalOcean Spaces does not require a specific region
     ResponseContentEncoding:"utf-8",
     credentials: {
-      accessKeyId: `${s3Key}`, // Ensure they are valid strings
-      secretAccessKey: `${s3Secret}`
+      accessKeyId: s3Key, // Ensure they are valid strings
+      secretAccessKey: s3Secret
     },
     forcePathStyle: false // DigitalOcean Spaces does NOT use path-style addressing
   });
