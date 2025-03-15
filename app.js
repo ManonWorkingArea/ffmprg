@@ -143,8 +143,15 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     space: spaceData, // Store spaceId for future processing
     storage: req.body.storage
   };
-
+  
   await Task.create(taskData); // Save to MongoDB
+
+  // อัปเดตข้อมูลในคอลเลกชัน storage โดยใช้ค่า 'queue'
+  await Storage.findOneAndUpdate(
+    { _id: new mongoose.Types.ObjectId(taskData.storage) },
+    { $set: { [`transcode.${taskData.quality}`]: 'queue' } }, // ตั้งค่าเป็น 'queue'
+    { new: true } // Returns the updated document
+  ).exec(); // เพิ่ม .exec() เพื่อให้แน่ใจว่าคำสั่งจะถูกดำเนินการ
 
   processQueue(taskId, taskData);
 
