@@ -343,7 +343,12 @@ function calculatePercent(taskData) {
 // ฟังก์ชันใหม่สำหรับจัดการคิวถัดไป
 async function processNextQueue() {
   if (isProcessing) return; // ถ้ากำลังประมวลผลอยู่ ให้หยุด
-  const nextTask = await Task.findOneAndDelete({ status: 'queued' }); // ดึง task ถัดไปจาก MongoDB
+  const nextTask = await Task.findOneAndUpdate(
+    { status: 'queued' },
+    { $set: { status: 'processing' } },
+    { new: true }
+  );
+  
   if (nextTask) {
     isProcessing = true; // ตั้งค่าสถานะการประมวลผล
     await processQueue(nextTask.taskId, nextTask); // เรียกใช้ processQueue สำหรับ task ถัดไป
