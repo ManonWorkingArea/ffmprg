@@ -61,7 +61,7 @@ const getSpaceData = async (spaceId) => {
   if (!spaceId) {
     throw new Error('Space ID is required');
   }
-  console.log('Fetching space data for spaceId:', spaceId); // เพิ่มการบันทึกเพื่อดีบัก
+  //console.log('Fetching space data for spaceId:', spaceId); // เพิ่มการบันทึกเพื่อดีบัก
   try {
     const spaceData = await Space.findOne({_id: new mongoose.Types.ObjectId(spaceId)}); // ใช้ new เพื่อสร้าง ObjectId
 

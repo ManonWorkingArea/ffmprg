@@ -78,12 +78,14 @@ const baseUrl = `http://159.65.131.165:${port}`; // อัปเดต base URL
 
 // Endpoint: Add conversion task to queue
 app.post('/convert', upload.single('video'), async (req, res) => {
+  console.log('Received conversion request'); // เพิ่ม log
   const quality = req.body.quality || '720p';
   const site = req.body.site; // Get the site from the request body
   let taskId;
 
   // Validate if site is provided
   if (!site) {
+    console.log('Site is required'); // เพิ่ม log
     return res.status(400).json({ success: false, error: 'Site is required' });
   }
 
@@ -92,41 +94,46 @@ app.post('/convert', upload.single('video'), async (req, res) => {
   let spaceData;
   try {
     hostnameData = await getHostnameData(site);
+    console.log('Fetched hostname data:', hostnameData); // เพิ่ม log
     if (!hostnameData) {
+      console.log('Hostname not found'); // เพิ่ม log
       return res.status(404).json({ success: false, error: 'Hostname not found' });
     }
   } catch (error) {
+    console.error('Failed to fetch hostname data:', error); // เพิ่ม log
     return res.status(500).json({ success: false, error: 'Failed to fetch hostname data' });
   }
-
-  console.log(hostnameData);
 
   try {
     spaceData = await getSpaceData(hostnameData.spaceId);
+    console.log('Fetched space data:', spaceData); // เพิ่ม log
     if (!spaceData) {
+      console.log('Space not found'); // เพิ่ม log
       return res.status(404).json({ success: false, error: 'Hostname not found' });
     }
   } catch (error) {
+    console.error('Failed to fetch space data:', error); // เพิ่ม log
     return res.status(500).json({ success: false, error: 'Failed to fetch hostname data' });
   }
 
-  console.log(spaceData);
-
   if (req.file) {
-    // Check if an existing task has the same inputPath
+    console.log('File uploaded:', req.file.path); // เพิ่ม log
     const existingTask = await Task.findOne({ inputPath: req.file.path });
     if (existingTask) {
+      console.log('Existing task found:', existingTask.taskId); // เพิ่ม log
       return res.json({ success: true, taskId: existingTask.taskId });
     }
     taskId = uuidv4();
   } else if (req.body.url) {
-    // Check if an existing task has the same URL
+    console.log('URL provided:', req.body.url); // เพิ่ม log
     const existingTask = await Task.findOne({ url: req.body.url });
     if (existingTask) {
+      console.log('Existing task found:', existingTask.taskId); // เพิ่ม log
       return res.json({ success: true, taskId: existingTask.taskId });
     }
     taskId = uuidv4();
   } else {
+    console.log('No video file or URL provided'); // เพิ่ม log
     return res.status(400).json({ success: false, error: 'Video file or URL required' });
   }
 
@@ -144,6 +151,7 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     storage: req.body.storage
   };
 
+  console.log('Task data created:', taskData); // เพิ่ม log
   await Task.create(taskData); // Save to MongoDB
 
   // อัปเดตข้อมูลในคอลเลกชัน storage โดยใช้ค่า 'queue'
@@ -153,6 +161,7 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     { new: true } // Returns the updated document
   ).exec(); // เพิ่ม .exec() เพื่อให้แน่ใจว่าคำสั่งจะถูกดำเนินการ
 
+  console.log('Process queue started for task:', taskId); // เพิ่ม log
   processQueue(taskId, taskData);
 
   res.json({ 
@@ -237,6 +246,7 @@ app.listen(port, () => {
 
 // Processing function
 async function processQueue(taskId, taskData) {
+  console.log('Processing queue for task:', taskId); // เพิ่ม log
   const outputFileName = `${taskId}-output.mp4`;
   const outputPath = path.join(__dirname, 'outputs', outputFileName);
 
@@ -253,13 +263,24 @@ async function processQueue(taskId, taskData) {
 
   // If URL provided, download the video
   if (taskData.url) {
+    console.log('Downloading video from URL:', taskData.url); // เพิ่ม log
+    await Task.updateOne({ taskId }, { status: 'downloading' }); // อัปเดตสถานะใน MongoDB
+    // อัปเดตข้อมูลในคอลเลกชัน storage โดยใช้ค่า 'downloading...'
+    await Storage.findOneAndUpdate(
+      { _id: new mongoose.Types.ObjectId(taskData.storage) },
+      { $set: { [`transcode.${taskData.quality}`]: 'downloading...' } }, // ตั้งค่าเป็น 'downloading...'
+      { new: true } // Returns the updated document
+    ).exec(); // เพิ่ม .exec() เพื่อให้แน่ใจว่าคำสั่งจะถูกดำเนินการ
+
     const writer = fs.createWriteStream(inputPath);
     const response = await axios.get(taskData.url, { responseType: 'stream' });
     response.data.pipe(writer);
     await new Promise(resolve => writer.on('finish', resolve));
+    console.log('Video downloaded to:', inputPath); // เพิ่ม log
   }
 
   await Task.updateOne({ taskId }, { status: 'processing' }); // อัปเดตสถานะใน MongoDB
+  console.log('Task status updated to processing for task:', taskId); // เพิ่ม log
 
   const spaceData = JSON.parse(JSON.stringify(await getSpaceData(taskData.site.spaceId)));
   taskData.space = spaceData;
@@ -279,12 +300,14 @@ async function processQueue(taskId, taskData) {
   });
 
   // เริ่มกระบวนการ ffmpeg
+  console.log('Starting ffmpeg process for task:', taskId); // เพิ่ม log
   ffmpegProcesses[taskId] = ffmpeg(inputPath)
     .size(videoSize)
     .videoCodec('libx264')
     .outputOptions(['-preset', 'veryfast', '-crf', '22'])
     .on('progress', async (progress) => {
       const percent = Math.round(progress.percent);
+      console.log(`Processing progress for task ${taskId}: ${percent}%`); // เพิ่ม log
       await Task.updateOne({ taskId }, { status: 'processing', percent });
 
       // อัปเดตข้อมูลในคอลเลกชัน storage โดยใช้เปอร์เซ็นต์
@@ -295,6 +318,7 @@ async function processQueue(taskId, taskData) {
       ).exec(); // เพิ่ม .exec() เพื่อให้แน่ใจว่าคำสั่งจะถูกดำเนินการ
     })    
     .on('end', async () => {
+      console.log('ffmpeg process completed for task:', taskId); // เพิ่ม log
       delete ffmpegProcesses[taskId]; // ลบกระบวนการเมื่อเสร็จสิ้น
       await Task.updateOne({ taskId }, { status: 'completed', outputFile: `/${outputFileName}` });
       
@@ -318,18 +342,23 @@ async function processQueue(taskId, taskData) {
           { new: true } // Returns the updated document
         ).exec(); // เพิ่ม .exec() เพื่อให้แน่ใจว่าคำสั่งจะถูกดำเนินการ
 
-        console.log("Storage updated");
+        console.log("Storage updated with remote URL:", remoteUrl); // เพิ่ม log
       } catch (uploadError) {
-        console.error('Error uploading to S3:', uploadError);
+        console.error('Error uploading to S3:', uploadError); // เพิ่ม log
       }
 
-      fs.unlink(inputPath, () => {});
+      fs.unlink(inputPath, () => {
+        console.log('Input file deleted:', inputPath); // เพิ่ม log
+      });
       processNextQueue(); // เรียกใช้ processNextQueue เพื่อประมวลผลงานถัดไป
     })
     .on('error', async (err) => {
+      console.error('ffmpeg process error for task:', taskId, err); // เพิ่ม log
       delete ffmpegProcesses[taskId]; // ลบกระบวนการเมื่อเกิดข้อผิดพลาด
       await Task.updateOne({ taskId }, { status: 'error', error: err.message });
-      fs.unlink(inputPath, () => {});
+      fs.unlink(inputPath, () => {
+        console.log('Input file deleted due to error:', inputPath); // เพิ่ม log
+      });
       processNextQueue(); // เรียกใช้ processNextQueue เพื่อประมวลผลงานถัดไป
     })
     .save(outputPath);
