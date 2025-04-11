@@ -9,14 +9,19 @@ const axios = require('axios');
 const fs = require('fs'); 
 const mongoose = require('mongoose');
 const { S3 } = require('@aws-sdk/client-s3');
+const osu = require('node-os-utils')
+const cpu = osu.cpu
+const mem = osu.mem
+const drive = osu.drive
 
 const { getHostnameData, getSpaceData } = require('./middleware/hostname'); // Import the function
 
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 3003;
 
 app.use(cors());
 app.use(express.json());
+app.use(express.static('public'));
 app.use(express.static('outputs'));
 
 const upload = multer({ dest: 'uploads/' });
@@ -239,6 +244,88 @@ app.post('/stop/:taskId', async (req, res) => {
 
 // Serve 'outputs' folder publicly
 app.use('/outputs', express.static(path.join(__dirname, 'outputs')));
+
+// เพิ่ม route สำหรับหน้าแรก
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// เพิ่ม endpoint ใหม่
+app.get('/system-metrics', async (req, res) => {
+  try {
+    const [cpuUsage, memInfo, diskInfo] = await Promise.all([
+      cpu.usage(), // CPU usage percentage
+      mem.info(), // Memory information
+      drive.info() // Disk information
+    ])
+
+    // แปลงค่าให้เป็นจำนวนเต็ม
+    const usedMemoryMB = Math.round(memInfo.usedMemMb);
+    const usedDiskGB = Math.round(diskInfo.usedGb);
+    
+    // คำนวณเปอร์เซ็นต์การใช้งาน
+    const memoryPercent = Math.round((usedMemoryMB / 8192) * 100);
+    const diskPercent = Math.round((usedDiskGB / 120) * 100);
+    
+    res.json({
+      cpu: {
+        cores: 4,
+        usage: Math.round(cpuUsage), // ปัดเศษให้เป็นจำนวนเต็ม
+        type: 'Regular Intel'
+      },
+      memory: {
+        total: 8192, // 8GB
+        used: usedMemoryMB,
+        free: 8192 - usedMemoryMB,
+        usagePercent: memoryPercent
+      },
+      disk: {
+        total: 120, // 120GB
+        used: usedDiskGB,
+        free: 120 - usedDiskGB,
+        usagePercent: diskPercent,
+        bandwidth: {
+          total: 5120, // 5TB
+          unit: 'GB'
+        }
+      },
+      server: {
+        type: 'Basic',
+        price: {
+          monthly: 48,
+          hourly: 0.071
+        }
+      }
+    })
+  } catch (error) {
+    console.error('Error getting system metrics:', error);
+    res.status(500).json({ error: 'Failed to get system metrics' })
+  }
+})
+
+// เพิ่ม endpoint สำหรับดึงข้อมูลระบบ
+app.get('/server-info', (req, res) => {
+  res.json({
+    server: {
+      framework: 'Express.js',
+      port: process.env.PORT || 3003,
+      baseUrl: `http://159.65.131.165:${port}`,
+      storage: {
+        database: 'MongoDB',
+        fileStorage: 'DigitalOcean Spaces'
+      },
+      middleware: ['CORS', 'JSON Parser', 'Static File Server']
+    },
+    ffmpeg: {
+      library: 'fluent-ffmpeg',
+      version: ffmpeg.version || 'N/A',
+      videoCodec: 'libx264',
+      preset: 'veryfast',
+      crfValue: 22,
+      supportedResolutions: ['420p', '720p', '1080p', '1920p']
+    }
+  });
+});
 
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
