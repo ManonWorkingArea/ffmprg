@@ -79,6 +79,92 @@ let isProcessing = false; // ตัวแปรเพื่อบอกสถา
 
 const baseUrl = `http://159.65.131.165:${port}`; // อัปเดต base URL
 
+// Endpoint: Get video metadata from URL
+app.post('/metadata', async (req, res) => {
+  const { url } = req.body;
+
+  if (!url) {
+    return res.status(400).json({ success: false, error: 'URL is required' });
+  }
+
+  console.log('Getting metadata for URL:', url);
+
+  try {
+    // ใช้ ffprobe เพื่อดึง metadata โดยไม่ต้องดาวน์โหลดไฟล์
+    ffmpeg.ffprobe(url, (err, metadata) => {
+      if (err) {
+        console.error('Error getting metadata:', err);
+        return res.status(500).json({ 
+          success: false, 
+          error: 'Failed to get video metadata',
+          details: err.message 
+        });
+      }
+
+      // ดึงข้อมูลสำคัญจาก metadata
+      const videoStream = metadata.streams.find(stream => stream.codec_type === 'video');
+      const audioStream = metadata.streams.find(stream => stream.codec_type === 'audio');
+      
+      const videoInfo = {
+        success: true,
+        metadata: {
+          format: {
+            filename: metadata.format.filename,
+            format_name: metadata.format.format_name,
+            format_long_name: metadata.format.format_long_name,
+            duration: parseFloat(metadata.format.duration),
+            size: parseInt(metadata.format.size) || 0,
+            bit_rate: parseInt(metadata.format.bit_rate) || 0,
+            nb_streams: metadata.format.nb_streams,
+            tags: metadata.format.tags || {}
+          },
+          video: videoStream ? {
+            codec_name: videoStream.codec_name,
+            codec_long_name: videoStream.codec_long_name,
+            width: videoStream.width,
+            height: videoStream.height,
+            aspect_ratio: videoStream.display_aspect_ratio || `${videoStream.width}:${videoStream.height}`,
+            pixel_format: videoStream.pix_fmt,
+            frame_rate: videoStream.r_frame_rate,
+            avg_frame_rate: videoStream.avg_frame_rate,
+            bit_rate: parseInt(videoStream.bit_rate) || 0,
+            duration: parseFloat(videoStream.duration) || 0,
+            tags: videoStream.tags || {}
+          } : null,
+          audio: audioStream ? {
+            codec_name: audioStream.codec_name,
+            codec_long_name: audioStream.codec_long_name,
+            sample_rate: parseInt(audioStream.sample_rate) || 0,
+            channels: audioStream.channels,
+            channel_layout: audioStream.channel_layout,
+            bit_rate: parseInt(audioStream.bit_rate) || 0,
+            duration: parseFloat(audioStream.duration) || 0,
+            tags: audioStream.tags || {}
+          } : null,
+          streams: metadata.streams.map(stream => ({
+            index: stream.index,
+            codec_name: stream.codec_name,
+            codec_type: stream.codec_type,
+            duration: parseFloat(stream.duration) || 0,
+            bit_rate: parseInt(stream.bit_rate) || 0
+          }))
+        }
+      };
+
+      console.log('Metadata extracted successfully');
+      res.json(videoInfo);
+    });
+
+  } catch (error) {
+    console.error('Error processing metadata request:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to process metadata request',
+      details: error.message 
+    });
+  }
+});
+
 // Grouped Endpoints
 
 // Endpoint: Add conversion task to queue
