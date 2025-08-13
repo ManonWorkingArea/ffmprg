@@ -123,7 +123,7 @@ app.post('/convert', upload.single('video'), async (req, res) => {
 
   if (req.file) {
     console.log('File uploaded:', req.file.path); // เพิ่ม log
-    const existingTask = await Task.findOne({ inputPath: req.file.path });
+    const existingTask = await Task.findOne({ inputPath: req.file.path, quality: quality });
     if (existingTask) {
       console.log('Existing task found:', existingTask.taskId); // เพิ่ม log
       return res.json({ success: true, taskId: existingTask.taskId });
@@ -131,7 +131,7 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     taskId = uuidv4();
   } else if (req.body.url) {
     console.log('URL provided:', req.body.url); // เพิ่ม log
-    const existingTask = await Task.findOne({ url: req.body.url });
+    const existingTask = await Task.findOne({ url: req.body.url, quality: quality });
     if (existingTask) {
       console.log('Existing task found:', existingTask.taskId); // เพิ่ม log
       return res.json({ success: true, taskId: existingTask.taskId });
