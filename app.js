@@ -79,6 +79,12 @@ const baseUrl = `http://159.65.131.165:${port}`; // อัปเดต base URL
 // Helper function สำหรับอัปเดต transcode field ใน Storage
 async function updateStorageTranscode(storageId, quality, value) {
   try {
+    // ตรวจสอบว่าค่าที่ส่งมาเป็น NaN หรือไม่
+    if (typeof value === 'number' && isNaN(value)) {
+      console.log('Skipping storage update due to NaN value');
+      return;
+    }
+    
     // ตรวจสอบว่า storage มี transcode field หรือไม่
     const storage = await Storage.findById(new mongoose.Types.ObjectId(storageId));
     if (!storage) return;
@@ -298,7 +304,7 @@ app.get('/status/:taskId', async (req, res) => {
   const response = {
     success: true,
     task,
-    percent: task.status === 'processing' ? calculatePercent(task) : 100, // คำนวณเปอร์เซ็นต์ถ้ากำลังประมวลผล
+    percent: task.status === 'processing' ? calculatePercent(task) : (task.status === 'completed' ? 100 : 0), // คำนวณเปอร์เซ็นต์ถ้ากำลังประมวลผล
     downloadLink: task.status === 'completed' ? `${baseUrl}/outputs/${taskId}-output.mp4` : null // ส่งลิงก์ดาวน์โหลดถ้าสถานะเป็น 'completed'
   };
 
@@ -605,7 +611,7 @@ app.get('/server-info', (req, res) => {
       videoCodec: 'libx264',
       preset: 'veryfast',
       crfValue: 22,
-      supportedResolutions: ['240p', '420p', '720p', '1080p', '1920p']
+      supportedResolutions: ['240p', '360p', '420p', '480p', '720p', '1080p', '1920p']
     }
   });
 });
@@ -629,13 +635,40 @@ async function processQueue(taskId, taskData) {
   const outputPath = path.join(__dirname, 'outputs', outputFileName);
 
   let videoSize;
+  let bitrate;
+  
   switch (taskData.quality) {
-    case '240p': videoSize = '426x240'; break;
-    case '420p': videoSize = '640x360'; break;
-    case '720p': videoSize = '1280x720'; break;
-    case '1080p': videoSize = '1920x1080'; break;
-    case '1920p': videoSize = '1920x1080'; break;
-    default: videoSize = '1280x720';
+    case '240p': 
+      videoSize = '426x240'; 
+      bitrate = '300k';
+      break;
+    case '360p': 
+      videoSize = '640x360'; 
+      bitrate = '500k';
+      break;
+    case '420p': 
+      videoSize = '748x420'; 
+      bitrate = '800k';
+      break;
+    case '480p': 
+      videoSize = '854x480'; 
+      bitrate = '1000k';
+      break;
+    case '720p': 
+      videoSize = '1280x720'; 
+      bitrate = '2500k';
+      break;
+    case '1080p': 
+      videoSize = '1920x1080'; 
+      bitrate = '5000k';
+      break;
+    case '1920p': 
+      videoSize = '1920x1080'; 
+      bitrate = '8000k';
+      break;
+    default: 
+      videoSize = '1280x720';
+      bitrate = '2500k';
   }
 
   const inputPath = taskData.inputPath || path.join('uploads', `${taskId}-input.mp4`);
@@ -762,9 +795,17 @@ async function processQueue(taskId, taskData) {
   ffmpegProcesses[taskId] = ffmpeg(inputPath)
     .size(videoSize)
     .videoCodec('libx264')
+    .videoBitrate(bitrate)
     .outputOptions(['-preset', 'veryfast', '-crf', '22'])
     .on('progress', async (progress) => {
-      const percent = Math.round(progress.percent);
+      const percent = Math.round(progress.percent) || 0; // ป้องกัน NaN
+      
+      // ตรวจสอบว่า percent เป็นตัวเลขที่ถูกต้องหรือไม่
+      if (isNaN(percent) || percent < 0 || percent > 100) {
+        console.log(`Invalid progress for task ${taskId}: ${progress.percent}%, skipping update`);
+        return; // ข้าม update ถ้าค่าไม่ถูกต้อง
+      }
+      
       console.log(`Processing progress for task ${taskId}: ${percent}%`); // เพิ่ม log
       await Task.updateOne({ taskId }, { status: 'processing', percent });
 
@@ -832,7 +873,11 @@ async function processQueue(taskId, taskData) {
 
 // ฟังก์ชันคำนวณเปอร์เซ็นต์
 function calculatePercent(taskData) {
-  return taskData.percent || 0; // คืนค่าเปอร์เซ็นต์จากข้อมูลที่บันทึกไว้
+  const percent = taskData.percent || 0;
+  // ป้องกัน NaN และให้ค่าในช่วง 0-100
+  if (isNaN(percent) || percent < 0) return 0;
+  if (percent > 100) return 100;
+  return percent;
 }
 
 // ฟังก์ชันใหม่สำหรับจัดการคิวถัดไป

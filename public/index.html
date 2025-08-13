@@ -28,6 +28,13 @@
                 <div class="mb-8">
                     <h1 class="text-2xl font-medium text-gray-900">ระบบจัดการการแปลงวิดีโอ</h1>
                     <p class="text-sm text-gray-500 mt-1">จัดการและติดตามสถานะการแปลงวิดีโอของคุณ</p>
+                    <div class="mt-2 p-3 bg-blue-50 border border-blue-200 rounded-md">
+                        <p class="text-xs text-blue-700">
+                            <i class="fas fa-info-circle mr-1"></i>
+                            <strong>สามารถปิดหน้าต่างได้:</strong> หลังจากเริ่มแปลงแล้ว คุณสามารถปิดหน้าต่างได้เลย 
+                            การแปลงจะทำงานต่อในพื้นหลัง เมื่อกลับมาดูจะเห็นสถานะล่าสุด และจะมีการแจ้งเตือนเมื่อเสร็จ
+                        </p>
+                    </div>
                 </div>
                 
                 <!-- การ์ดแสดงสถิติ -->
@@ -277,7 +284,8 @@
                             crfValue: '',
                             supportedResolutions: []
                         }
-                    }
+                    },
+                    completedTasks: new Set() // เก็บ task ที่เสร็จแล้วเพื่อไม่แจ้งเตือนซ้ำ
                 }
             },
 
@@ -287,6 +295,9 @@
                 this.fetchSystemMetrics()
                 this.metricsInterval = setInterval(this.fetchSystemMetrics, 2000)
                 this.fetchServerInfo()
+                
+                // ขอสิทธิ์แจ้งเตือน
+                this.requestNotificationPermission()
             },
 
             beforeUnmount() {
@@ -299,6 +310,17 @@
                     try {
                         const response = await fetch('/tasks')
                         const data = await response.json()
+                        
+                        // ตรวจสอบ task ที่เพิ่งเสร็จ
+                        if (this.tasks.length > 0) {
+                            data.tasks.forEach(task => {
+                                const oldTask = this.tasks.find(t => t.taskId === task.taskId)
+                                if (oldTask && oldTask.status !== 'completed' && task.status === 'completed') {
+                                    this.showCompletionNotification(task)
+                                }
+                            })
+                        }
+                        
                         this.tasks = data.tasks.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
                         this.updateStats()
                         this.loading = false
@@ -307,6 +329,32 @@
                         this.showNotification = true
                         this.notificationMessage = 'เกิดข้อผิดพลาดในการดึงข้อมูล'
                         setTimeout(() => this.showNotification = false, 3000)
+                    }
+                },
+
+                showCompletionNotification(task) {
+                    // แจ้งเตือนแบบเสียง (ถ้าเบราว์เซอร์รองรับ)
+                    if ('Notification' in window && Notification.permission === 'granted') {
+                        new Notification('การแปลงวิดีโอเสร็จสิ้น!', {
+                            body: `Task ${task.taskId.substring(0, 8)} (${task.quality}) แปลงเสร็จแล้ว`,
+                            icon: '/favicon.ico',
+                            tag: task.taskId
+                        })
+                    }
+                    
+                    // แจ้งเตือนใน UI
+                    this.showNotification = true
+                    this.notificationMessage = `🎉 การแปลงวิดีโอเสร็จสิ้น! (${task.quality})`
+                    setTimeout(() => this.showNotification = false, 5000)
+                },
+
+                requestNotificationPermission() {
+                    if ('Notification' in window && Notification.permission === 'default') {
+                        Notification.requestPermission().then(permission => {
+                            if (permission === 'granted') {
+                                console.log('Notification permission granted')
+                            }
+                        })
                     }
                 },
 
