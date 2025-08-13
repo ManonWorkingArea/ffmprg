@@ -322,7 +322,7 @@ app.get('/server-info', (req, res) => {
       videoCodec: 'libx264',
       preset: 'veryfast',
       crfValue: 22,
-      supportedResolutions: ['420p', '720p', '1080p', '1920p']
+      supportedResolutions: ['240p', '420p', '720p', '1080p', '1920p']
     }
   });
 });
@@ -339,6 +339,7 @@ async function processQueue(taskId, taskData) {
 
   let videoSize;
   switch (taskData.quality) {
+    case '240p': videoSize = '426x240'; break;
     case '420p': videoSize = '640x360'; break;
     case '720p': videoSize = '1280x720'; break;
     case '1080p': videoSize = '1920x1080'; break;
