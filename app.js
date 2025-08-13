@@ -27,10 +27,7 @@ app.use(express.static('outputs'));
 const upload = multer({ dest: 'uploads/' });
 
 // เชื่อมต่อกับ MongoDB
-mongoose.connect('mongodb+srv://vue:Qazwsx1234!!@cloudmongodb.wpc62e9.mongodb.net/API', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-}).then(() => {
+mongoose.connect('mongodb+srv://vue:Qazwsx1234!!@cloudmongodb.wpc62e9.mongodb.net/API').then(() => {
   console.log('MongoDB :: Connected.');
 }).catch(err => {
   console.error('Failed to connect to MongoDB:', err);
@@ -78,6 +75,33 @@ let ffmpegProcesses = {}; // เก็บข้อมูลเกี่ยวก
 let isProcessing = false; // ตัวแปรเพื่อบอกสถานะการประมวลผล
 
 const baseUrl = `http://159.65.131.165:${port}`; // อัปเดต base URL
+
+// Helper function สำหรับอัปเดต transcode field ใน Storage
+async function updateStorageTranscode(storageId, quality, value) {
+  try {
+    // ตรวจสอบว่า storage มี transcode field หรือไม่
+    const storage = await Storage.findById(new mongoose.Types.ObjectId(storageId));
+    if (!storage) return;
+    
+    // ถ้า transcode เป็น null หรือไม่มี ให้สร้างใหม่
+    if (!storage.transcode || storage.transcode === null) {
+      await Storage.findOneAndUpdate(
+        { _id: new mongoose.Types.ObjectId(storageId) },
+        { $set: { transcode: { [quality]: value } } },
+        { new: true }
+      ).exec();
+    } else {
+      // ถ้ามี transcode แล้ว ให้อัปเดตเฉพาะ field นั้น
+      await Storage.findOneAndUpdate(
+        { _id: new mongoose.Types.ObjectId(storageId) },
+        { $set: { [`transcode.${quality}`]: value } },
+        { new: true }
+      ).exec();
+    }
+  } catch (error) {
+    console.error('Error updating storage transcode:', error);
+  }
+}
 
 // Endpoint: Get video metadata from URL
 app.post('/metadata', async (req, res) => {
@@ -246,11 +270,7 @@ app.post('/convert', upload.single('video'), async (req, res) => {
   await Task.create(taskData); // Save to MongoDB
 
   // อัปเดตข้อมูลในคอลเลกชัน storage โดยใช้ค่า 'queue'
-  await Storage.findOneAndUpdate(
-    { _id: new mongoose.Types.ObjectId(taskData.storage) },
-    { $set: { [`transcode.${taskData.quality}`]: 'queue...' } }, // ตั้งค่าเป็น 'queue'
-    { new: true } // Returns the updated document
-  ).exec(); // เพิ่ม .exec() เพื่อให้แน่ใจว่าคำสั่งจะถูกดำเนินการ
+  await updateStorageTranscode(taskData.storage, taskData.quality, 'queue...');
 
   console.log('Process queue started for task:', taskId); // เพิ่ม log
   
@@ -419,11 +439,7 @@ app.post('/restart/:taskId', async (req, res) => {
 
     // อัปเดต storage
     if (task.storage) {
-      await Storage.findOneAndUpdate(
-        { _id: new mongoose.Types.ObjectId(task.storage) },
-        { $set: { [`transcode.${task.quality}`]: 'queue...' } },
-        { new: true }
-      ).exec();
+      await updateStorageTranscode(task.storage, task.quality, 'queue...');
     }
 
     // เริ่ม queue ใหม่
@@ -486,11 +502,15 @@ app.delete('/task/:taskId', async (req, res) => {
 
     // ลบข้อมูล transcode จาก Storage collection ถ้ามี storage
     if (task.storage) {
-      await Storage.findOneAndUpdate(
-        { _id: new mongoose.Types.ObjectId(task.storage) },
-        { $unset: { [`transcode.${task.quality}`]: "" } },
-        { new: true }
-      ).exec();
+      try {
+        await Storage.findOneAndUpdate(
+          { _id: new mongoose.Types.ObjectId(task.storage) },
+          { $unset: { [`transcode.${task.quality}`]: "" } },
+          { new: true }
+        ).exec();
+      } catch (error) {
+        console.log('Error removing transcode field:', error);
+      }
     }
 
     // ลบ task จากฐานข้อมูล
@@ -625,11 +645,7 @@ async function processQueue(taskId, taskData) {
     console.log('Downloading video from URL:', taskData.url); // เพิ่ม log
     await Task.updateOne({ taskId }, { status: 'downloading' }); // อัปเดตสถานะใน MongoDB
     // อัปเดตข้อมูลในคอลเลกชัน storage โดยใช้ค่า 'downloading...'
-    await Storage.findOneAndUpdate(
-      { _id: new mongoose.Types.ObjectId(taskData.storage) },
-      { $set: { [`transcode.${taskData.quality}`]: 'downloading...' } }, // ตั้งค่าเป็น 'downloading...'
-      { new: true } // Returns the updated document
-    ).exec(); // เพิ่ม .exec() เพื่อให้แน่ใจว่าคำสั่งจะถูกดำเนินการ
+    await updateStorageTranscode(taskData.storage, taskData.quality, 'downloading...');
 
     try {
       const writer = fs.createWriteStream(inputPath);
@@ -682,11 +698,7 @@ async function processQueue(taskId, taskData) {
     } catch (downloadError) {
       console.error('Download failed for task:', taskId, downloadError);
       await Task.updateOne({ taskId }, { status: 'error', error: `Download failed: ${downloadError.message}` });
-      await Storage.findOneAndUpdate(
-        { _id: new mongoose.Types.ObjectId(taskData.storage) },
-        { $set: { [`transcode.${taskData.quality}`]: 'error' } },
-        { new: true }
-      ).exec();
+      await updateStorageTranscode(taskData.storage, taskData.quality, 'error');
       
       // ประมวลผล task ถัดไป
       setTimeout(async () => {
@@ -711,11 +723,7 @@ async function processQueue(taskId, taskData) {
   } catch (fileError) {
     console.error('Input file verification failed:', fileError);
     await Task.updateOne({ taskId }, { status: 'error', error: `Input file error: ${fileError.message}` });
-    await Storage.findOneAndUpdate(
-      { _id: new mongoose.Types.ObjectId(taskData.storage) },
-      { $set: { [`transcode.${taskData.quality}`]: 'error' } },
-      { new: true }
-    ).exec();
+    await updateStorageTranscode(taskData.storage, taskData.quality, 'error');
     
     // ประมวลผล task ถัดไป
     setTimeout(async () => {
@@ -761,11 +769,7 @@ async function processQueue(taskId, taskData) {
       await Task.updateOne({ taskId }, { status: 'processing', percent });
 
       // อัปเดตข้อมูลในคอลเลกชัน storage โดยใช้เปอร์เซ็นต์
-      await Storage.findOneAndUpdate(
-        { _id: new mongoose.Types.ObjectId(taskData.storage) },
-        { $set: { [`transcode.${taskData.quality}`]: percent } }, // อัปเดตเปอร์เซ็นต์
-        { new: true } // Returns the updated document
-      ).exec(); // เพิ่ม .exec() เพื่อให้แน่ใจว่าคำสั่งจะถูกดำเนินการ
+      await updateStorageTranscode(taskData.storage, taskData.quality, percent);
     })    
     .on('end', async () => {
       console.log('ffmpeg process completed for task:', taskId); // เพิ่ม log
@@ -785,12 +789,8 @@ async function processQueue(taskId, taskData) {
         const uploadResult = await s3Client.putObject(params); // เปลี่ยนเป็นใช้ putObject
         const remoteUrl = `${taskData.space.s3Endpoint}outputs/${outputFileName}`; // สร้าง URL ของไฟล์ที่อัปโหลด
 
-        // อัปเดตข้อมูลในคอลเลกชัน storage โดยใช้เปอร์เซ็นต์
-        await Storage.findOneAndUpdate(
-          { _id: new mongoose.Types.ObjectId(taskData.storage) },
-          { $set: { [`transcode.${taskData.quality}`]: remoteUrl } }, // อัปเดต remoteUrl
-          { new: true } // Returns the updated document
-        ).exec(); // เพิ่ม .exec() เพื่อให้แน่ใจว่าคำสั่งจะถูกดำเนินการ
+        // อัปเดตข้อมูลในคอลเลกชัน storage โดยใช้ remoteUrl
+        await updateStorageTranscode(taskData.storage, taskData.quality, remoteUrl);
 
         console.log("Storage updated with remote URL:", remoteUrl); // เพิ่ม log
       } catch (uploadError) {
