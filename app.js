@@ -320,11 +320,48 @@ app.post('/start/:taskId', async (req, res) => {
 app.post('/start-queue', async (req, res) => {
   try {
     console.log('Force starting queue processing...');
+    isProcessing = false; // รีเซ็ต flag
     processNextQueue();
     res.json({ success: true, message: 'Queue processing started' });
   } catch (error) {
     console.error('Error starting queue:', error);
     res.status(500).json({ success: false, error: 'Failed to start queue' });
+  }
+});
+
+// Endpoint: Debug queue status
+app.get('/debug/queue', async (req, res) => {
+  try {
+    const queuedTasks = await Task.find({ status: 'queued' });
+    const processingTasks = await Task.find({ status: 'processing' });
+    const allTasks = await Task.find();
+    
+    res.json({
+      success: true,
+      debug: {
+        isProcessing,
+        queuedCount: queuedTasks.length,
+        processingCount: processingTasks.length,
+        totalTasks: allTasks.length,
+        queuedTasks: queuedTasks.map(t => ({ taskId: t.taskId, status: t.status, createdAt: t.createdAt })),
+        processingTasks: processingTasks.map(t => ({ taskId: t.taskId, status: t.status, percent: t.percent })),
+        ffmpegProcesses: Object.keys(ffmpegProcesses)
+      }
+    });
+  } catch (error) {
+    console.error('Error getting debug info:', error);
+    res.status(500).json({ success: false, error: 'Failed to get debug info' });
+  }
+});
+
+// Endpoint: Reset processing flag
+app.post('/debug/reset', async (req, res) => {
+  try {
+    isProcessing = false;
+    console.log('Processing flag reset to false');
+    res.json({ success: true, message: 'Processing flag reset' });
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to reset flag' });
   }
 });
 
@@ -739,18 +776,31 @@ function calculatePercent(taskData) {
 
 // ฟังก์ชันใหม่สำหรับจัดการคิวถัดไป
 async function processNextQueue() {
-  if (isProcessing) return; // ถ้ากำลังประมวลผลอยู่ ให้หยุด
-  const nextTask = await Task.findOneAndUpdate(
-    { status: 'queued' },
-    { $set: { status: 'processing' } },
-    { new: true }
-  );
+  if (isProcessing) {
+    console.log('Queue is already processing, skipping...');
+    return; // ถ้ากำลังประมวลผลอยู่ ให้หยุด
+  }
+  
+  const nextTask = await Task.findOne({ status: 'queued' });
   
   if (nextTask) {
+    console.log('Found queued task:', nextTask.taskId);
     isProcessing = true; // ตั้งค่าสถานะการประมวลผล
-    await processQueue(nextTask.taskId, nextTask); // เรียกใช้ processQueue สำหรับ task ถัดไป
-    isProcessing = false; // รีเซ็ตสถานะการประมวลผล
-    processNextQueue(); // เรียกใช้ processNextQueue เพื่อประมวลผลงานถัดไป
+    
+    try {
+      await processQueue(nextTask.taskId, nextTask); // เรียกใช้ processQueue สำหรับ task ถัดไป
+    } catch (error) {
+      console.error('Error processing task:', nextTask.taskId, error);
+      await Task.updateOne({ taskId: nextTask.taskId }, { status: 'error', error: error.message });
+    } finally {
+      isProcessing = false; // รีเซ็ตสถานะการประมวลผล
+      // ตรวจสอบว่ามี task อื่นๆ ที่รออยู่หรือไม่
+      setTimeout(() => {
+        processNextQueue(); // เรียกใช้ processNextQueue เพื่อประมวลผลงานถัดไป
+      }, 1000);
+    }
+  } else {
+    console.log('No queued tasks found');
   }
 }
 
