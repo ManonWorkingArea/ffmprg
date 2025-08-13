@@ -254,8 +254,8 @@ app.post('/convert', upload.single('video'), async (req, res) => {
 
   console.log('Process queue started for task:', taskId); // เพิ่ม log
   
-  // เริ่มกระบวนการ queue แทนการเรียกใช้ processQueue โดยตรง
-  processNextQueue();
+  // เรียกใช้ processQueue โดยตรงแทนการใช้ queue system
+  processQueue(taskId, taskData);
 
   res.json({ 
     success: true, 
@@ -311,7 +311,7 @@ app.post('/start/:taskId', async (req, res) => {
   }
 
   // เริ่มกระบวนการ queue
-  processNextQueue();
+  processQueue(taskId, task);
 
   res.json({ success: true, message: `Task ${taskId} started.` });
 });
@@ -320,9 +320,30 @@ app.post('/start/:taskId', async (req, res) => {
 app.post('/start-queue', async (req, res) => {
   try {
     console.log('Force starting queue processing...');
-    isProcessing = false; // รีเซ็ต flag
-    processNextQueue();
-    res.json({ success: true, message: 'Queue processing started' });
+    
+    // หา task ที่รอดำเนินการ
+    const queuedTasks = await Task.find({ status: 'queued' });
+    
+    if (queuedTasks.length > 0) {
+      console.log(`Found ${queuedTasks.length} queued tasks`);
+      
+      // เรียกใช้ processQueue สำหรับ task แรก
+      const firstTask = queuedTasks[0];
+      console.log('Starting first task:', firstTask.taskId);
+      processQueue(firstTask.taskId, firstTask);
+      
+      res.json({ 
+        success: true, 
+        message: `Queue processing started for task ${firstTask.taskId}`,
+        tasksFound: queuedTasks.length 
+      });
+    } else {
+      res.json({ 
+        success: true, 
+        message: 'No queued tasks found',
+        tasksFound: 0 
+      });
+    }
   } catch (error) {
     console.error('Error starting queue:', error);
     res.status(500).json({ success: false, error: 'Failed to start queue' });
@@ -406,7 +427,7 @@ app.post('/restart/:taskId', async (req, res) => {
     }
 
     // เริ่ม queue ใหม่
-    processNextQueue();
+    processQueue(taskId, task);
 
     console.log(`Task ${taskId} restarted successfully`);
     res.json({ success: true, message: `Task ${taskId} restarted successfully.` });
@@ -571,8 +592,14 @@ app.get('/server-info', (req, res) => {
 
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
-  // เริ่มต้นประมวลผล queue ที่อาจค้างอยู่
-  processNextQueue();
+  // ตรวจสอบว่ามี task ที่รอประมวลผลหรือไม่
+  setTimeout(async () => {
+    const queuedTasks = await Task.find({ status: 'queued' });
+    if (queuedTasks.length > 0) {
+      console.log(`Found ${queuedTasks.length} pending tasks, starting first task`);
+      processQueue(queuedTasks[0].taskId, queuedTasks[0]);
+    }
+  }, 2000);
 });
 
 // Processing function
@@ -660,7 +687,16 @@ async function processQueue(taskId, taskData) {
         { $set: { [`transcode.${taskData.quality}`]: 'error' } },
         { new: true }
       ).exec();
-      processNextQueue(); // ประมวลผล task ถัดไป
+      
+      // ประมวลผล task ถัดไป
+      setTimeout(async () => {
+        const nextTask = await Task.findOne({ status: 'queued' });
+        if (nextTask) {
+          console.log('Starting next task after download error:', nextTask.taskId);
+          processQueue(nextTask.taskId, nextTask);
+        }
+      }, 1000);
+      
       return; // หยุดการทำงานของ task นี้
     }
   }
@@ -680,7 +716,16 @@ async function processQueue(taskId, taskData) {
       { $set: { [`transcode.${taskData.quality}`]: 'error' } },
       { new: true }
     ).exec();
-    processNextQueue();
+    
+    // ประมวลผล task ถัดไป
+    setTimeout(async () => {
+      const nextTask = await Task.findOne({ status: 'queued' });
+      if (nextTask) {
+        console.log('Starting next task after file verification error:', nextTask.taskId);
+        processQueue(nextTask.taskId, nextTask);
+      }
+    }, 1000);
+    
     return;
   }
 
@@ -755,7 +800,15 @@ async function processQueue(taskId, taskData) {
       fs.unlink(inputPath, () => {
         console.log('Input file deleted:', inputPath); // เพิ่ม log
       });
-      processNextQueue(); // เรียกใช้ processNextQueue เพื่อประมวลผลงานถัดไป
+      
+      // ประมวลผล task ถัดไป
+      setTimeout(async () => {
+        const nextTask = await Task.findOne({ status: 'queued' });
+        if (nextTask) {
+          console.log('Starting next task:', nextTask.taskId);
+          processQueue(nextTask.taskId, nextTask);
+        }
+      }, 1000);
     })
     .on('error', async (err) => {
       console.error('ffmpeg process error for task:', taskId, err); // เพิ่ม log
@@ -764,7 +817,15 @@ async function processQueue(taskId, taskData) {
       fs.unlink(inputPath, () => {
         console.log('Input file deleted due to error:', inputPath); // เพิ่ม log
       });
-      processNextQueue(); // เรียกใช้ processNextQueue เพื่อประมวลผลงานถัดไป
+      
+      // ประมวลผล task ถัดไป
+      setTimeout(async () => {
+        const nextTask = await Task.findOne({ status: 'queued' });
+        if (nextTask) {
+          console.log('Starting next task after error:', nextTask.taskId);
+          processQueue(nextTask.taskId, nextTask);
+        }
+      }, 1000);
     })
     .save(outputPath);
 }
