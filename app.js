@@ -328,6 +328,58 @@ app.post('/start-queue', async (req, res) => {
   }
 });
 
+// Endpoint: Restart stuck task
+app.post('/restart/:taskId', async (req, res) => {
+  const taskId = req.params.taskId;
+  
+  try {
+    const task = await Task.findOne({ taskId });
+    
+    if (!task) {
+      return res.status(404).json({ success: false, error: 'Task not found' });
+    }
+
+    // หยุดกระบวนการ ffmpeg ถ้ากำลังทำงานอยู่
+    if (ffmpegProcesses[taskId]) {
+      ffmpegProcesses[taskId].kill('SIGINT');
+      delete ffmpegProcesses[taskId];
+    }
+
+    // ลบไฟล์ input ที่อาจดาวน์โหลดไม่สมบูรณ์
+    if (task.inputPath) {
+      fs.unlink(task.inputPath, (err) => {
+        if (err) console.log('Input file not found or already deleted');
+      });
+    }
+
+    // รีเซ็ตสถานะเป็น queued
+    await Task.updateOne({ taskId }, { 
+      status: 'queued', 
+      percent: 0,
+      error: null 
+    });
+
+    // อัปเดต storage
+    if (task.storage) {
+      await Storage.findOneAndUpdate(
+        { _id: new mongoose.Types.ObjectId(task.storage) },
+        { $set: { [`transcode.${task.quality}`]: 'queue...' } },
+        { new: true }
+      ).exec();
+    }
+
+    // เริ่ม queue ใหม่
+    processNextQueue();
+
+    console.log(`Task ${taskId} restarted successfully`);
+    res.json({ success: true, message: `Task ${taskId} restarted successfully.` });
+
+  } catch (error) {
+    console.error('Error restarting task:', error);
+    res.status(500).json({ success: false, error: 'Failed to restart task' });
+  }
+});
+
 // Endpoint: Stop ffmpeg process
 app.post('/stop/:taskId', async (req, res) => {
   const taskId = req.params.taskId;
@@ -515,11 +567,84 @@ async function processQueue(taskId, taskData) {
       { new: true } // Returns the updated document
     ).exec(); // เพิ่ม .exec() เพื่อให้แน่ใจว่าคำสั่งจะถูกดำเนินการ
 
-    const writer = fs.createWriteStream(inputPath);
-    const response = await axios.get(taskData.url, { responseType: 'stream' });
-    response.data.pipe(writer);
-    await new Promise(resolve => writer.on('finish', resolve));
-    console.log('Video downloaded to:', inputPath); // เพิ่ม log
+    try {
+      const writer = fs.createWriteStream(inputPath);
+      
+      // เพิ่ม timeout และ headers สำหรับการดาวน์โหลด
+      const response = await axios.get(taskData.url, { 
+        responseType: 'stream',
+        timeout: 300000, // 5 minutes timeout
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+      });
+      
+      response.data.pipe(writer);
+      
+      // เพิ่ม error handling สำหรับ stream
+      await new Promise((resolve, reject) => {
+        let downloadedBytes = 0;
+        const totalBytes = parseInt(response.headers['content-length']) || 0;
+        
+        response.data.on('data', (chunk) => {
+          downloadedBytes += chunk.length;
+          if (totalBytes > 0) {
+            const percent = Math.round((downloadedBytes / totalBytes) * 100);
+            console.log(`Download progress for task ${taskId}: ${percent}% (${downloadedBytes}/${totalBytes} bytes)`);
+          }
+        });
+        
+        writer.on('finish', () => {
+          console.log('Video downloaded successfully to:', inputPath);
+          resolve();
+        });
+        
+        writer.on('error', (err) => {
+          console.error('Writer error:', err);
+          reject(err);
+        });
+        
+        response.data.on('error', (err) => {
+          console.error('Download stream error:', err);
+          reject(err);
+        });
+        
+        // เพิ่ม timeout สำหรับการดาวน์โหลด
+        setTimeout(() => {
+          reject(new Error('Download timeout after 5 minutes'));
+        }, 300000);
+      });
+      
+    } catch (downloadError) {
+      console.error('Download failed for task:', taskId, downloadError);
+      await Task.updateOne({ taskId }, { status: 'error', error: `Download failed: ${downloadError.message}` });
+      await Storage.findOneAndUpdate(
+        { _id: new mongoose.Types.ObjectId(taskData.storage) },
+        { $set: { [`transcode.${taskData.quality}`]: 'error' } },
+        { new: true }
+      ).exec();
+      processNextQueue(); // ประมวลผล task ถัดไป
+      return; // หยุดการทำงานของ task นี้
+    }
+  }
+
+  // ตรวจสอบว่าไฟล์ input มีอยู่จริงและไม่เสียหาย
+  try {
+    const fileStats = fs.statSync(inputPath);
+    if (fileStats.size === 0) {
+      throw new Error('Downloaded file is empty');
+    }
+    console.log(`Input file verified: ${inputPath} (${fileStats.size} bytes)`);
+  } catch (fileError) {
+    console.error('Input file verification failed:', fileError);
+    await Task.updateOne({ taskId }, { status: 'error', error: `Input file error: ${fileError.message}` });
+    await Storage.findOneAndUpdate(
+      { _id: new mongoose.Types.ObjectId(taskData.storage) },
+      { $set: { [`transcode.${taskData.quality}`]: 'error' } },
+      { new: true }
+    ).exec();
+    processNextQueue();
+    return;
   }
 
   await Task.updateOne({ taskId }, { status: 'processing' }); // อัปเดตสถานะใน MongoDB
