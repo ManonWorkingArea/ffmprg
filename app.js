@@ -328,6 +328,59 @@ app.post('/stop/:taskId', async (req, res) => {
   }
 });
 
+// Endpoint: Delete task
+app.delete('/task/:taskId', async (req, res) => {
+  const taskId = req.params.taskId;
+
+  try {
+    const task = await Task.findOne({ taskId });
+    
+    if (!task) {
+      return res.status(404).json({ success: false, error: 'Task not found' });
+    }
+
+    // หยุดกระบวนการ ffmpeg ถ้ากำลังทำงานอยู่
+    if (ffmpegProcesses[taskId]) {
+      ffmpegProcesses[taskId].kill('SIGINT');
+      delete ffmpegProcesses[taskId];
+    }
+
+    // ลบไฟล์ output ถ้ามี
+    if (task.outputFile) {
+      const outputPath = path.join(__dirname, 'outputs', `${taskId}-output.mp4`);
+      fs.unlink(outputPath, (err) => {
+        if (err) console.log('Output file not found or already deleted');
+      });
+    }
+
+    // ลบไฟล์ input ถ้ามี
+    if (task.inputPath) {
+      fs.unlink(task.inputPath, (err) => {
+        if (err) console.log('Input file not found or already deleted');
+      });
+    }
+
+    // ลบข้อมูล transcode จาก Storage collection ถ้ามี storage
+    if (task.storage) {
+      await Storage.findOneAndUpdate(
+        { _id: new mongoose.Types.ObjectId(task.storage) },
+        { $unset: { [`transcode.${task.quality}`]: "" } },
+        { new: true }
+      ).exec();
+    }
+
+    // ลบ task จากฐานข้อมูล
+    await Task.deleteOne({ taskId });
+
+    console.log(`Task ${taskId} deleted successfully`);
+    res.json({ success: true, message: `Task ${taskId} deleted successfully.` });
+
+  } catch (error) {
+    console.error('Error deleting task:', error);
+    res.status(500).json({ success: false, error: 'Failed to delete task' });
+  }
+});
+
 // Serve 'outputs' folder publicly
 app.use('/outputs', express.static(path.join(__dirname, 'outputs')));
 
