@@ -253,7 +253,9 @@ app.post('/convert', upload.single('video'), async (req, res) => {
   ).exec(); // เพิ่ม .exec() เพื่อให้แน่ใจว่าคำสั่งจะถูกดำเนินการ
 
   console.log('Process queue started for task:', taskId); // เพิ่ม log
-  processQueue(taskId, taskData);
+  
+  // เริ่มกระบวนการ queue แทนการเรียกใช้ processQueue โดยตรง
+  processNextQueue();
 
   res.json({ 
     success: true, 
@@ -308,10 +310,22 @@ app.post('/start/:taskId', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Task is not in a queued or error state' });
   }
 
-  // เริ่มกระบวนการ ffmpeg
-  processQueue(taskId, task);
+  // เริ่มกระบวนการ queue
+  processNextQueue();
 
   res.json({ success: true, message: `Task ${taskId} started.` });
+});
+
+// Endpoint: Force start queue processing
+app.post('/start-queue', async (req, res) => {
+  try {
+    console.log('Force starting queue processing...');
+    processNextQueue();
+    res.json({ success: true, message: 'Queue processing started' });
+  } catch (error) {
+    console.error('Error starting queue:', error);
+    res.status(500).json({ success: false, error: 'Failed to start queue' });
+  }
 });
 
 // Endpoint: Stop ffmpeg process
@@ -468,6 +482,8 @@ app.get('/server-info', (req, res) => {
 
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
+  // เริ่มต้นประมวลผล queue ที่อาจค้างอยู่
+  processNextQueue();
 });
 
 // Processing function

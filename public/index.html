@@ -112,8 +112,14 @@
                     <div class="p-4">
                         <div class="flex justify-between items-center mb-6">
                             <h2 class="text-lg font-medium">รายการงานทั้งหมด</h2>
-                            <div class="text-xs text-gray-500">
-                                <i class="fas fa-sync-alt mr-1"></i>อัพเดทอัตโนมัติทุก 5 วินาที
+                            <div class="flex items-center gap-4">
+                                <button @click="startQueue" 
+                                        class="text-xs px-3 py-1.5 bg-blue-500 text-white rounded hover:bg-blue-600">
+                                    <i class="fas fa-play mr-1"></i>เริ่ม Queue
+                                </button>
+                                <div class="text-xs text-gray-500">
+                                    <i class="fas fa-sync-alt mr-1"></i>อัพเดทอัตโนมัติทุก 5 วินาที
+                                </div>
                             </div>
                         </div>
                         
@@ -332,6 +338,27 @@
                         console.error('เกิดข้อผิดพลาดในการลบงาน:', error)
                         this.showNotification = true
                         this.notificationMessage = 'เกิดข้อผิดพลาดในการลบงาน'
+                        setTimeout(() => this.showNotification = false, 3000)
+                    }
+                },
+
+                async startQueue() {
+                    try {
+                        const response = await fetch('/start-queue', { method: 'POST' })
+                        const data = await response.json()
+                        
+                        if (data.success) {
+                            this.showNotification = true
+                            this.notificationMessage = 'เริ่มประมวลผล Queue แล้ว'
+                            setTimeout(() => this.showNotification = false, 3000)
+                            this.fetchTasks()
+                        } else {
+                            throw new Error(data.error)
+                        }
+                    } catch (error) {
+                        console.error('เกิดข้อผิดพลาดในการเริ่ม Queue:', error)
+                        this.showNotification = true
+                        this.notificationMessage = 'เกิดข้อผิดพลาดในการเริ่ม Queue'
                         setTimeout(() => this.showNotification = false, 3000)
                     }
                 },
