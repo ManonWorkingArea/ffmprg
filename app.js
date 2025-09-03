@@ -1022,9 +1022,16 @@ async function processNextQueue() {
     );
     
     if (nextTask) {
-      console.log(`Found next task: ${nextTask.taskId} (System: CPU ${systemLoad.cpuUsage}%, Memory ${systemLoad.memoryUsage}%)`);
-      // เริ่มประมวลผลโดยมี delay เล็กน้อยเพื่อให้ระบบได้พัก
-      setTimeout(() => processQueue(nextTask.taskId, nextTask), 2000);
+      console.log(`Found next task: ${nextTask.taskId} (Type: ${nextTask.type || 'convert'}) (System: CPU ${systemLoad.cpuUsage}%, Memory ${systemLoad.memoryUsage}%)`);
+      
+      // เลือก processing function ตาม task type
+      setTimeout(() => {
+        if (nextTask.type === 'trim') {
+          processTrimQueue(nextTask.taskId, nextTask);
+        } else {
+          processQueue(nextTask.taskId, nextTask);
+        }
+      }, 2000);
     } else {
       console.log('No queued tasks found');
     }
@@ -1072,4 +1079,508 @@ async function retryFailedTasks() {
 
 // เรียกใช้ retry ทุก 5 นาที
 setInterval(retryFailedTasks, 5 * 60 * 1000);
+
+// Endpoint: Video trimming with overlays
+app.post('/trim', async (req, res) => {
+  console.log('Received trim request');
+  const trimData = req.body;
+  const site = trimData.site || req.body.site;
+  let taskId;
+
+  // Validate required fields
+  if (!trimData.input_url) {
+    return res.status(400).json({ success: false, error: 'input_url is required' });
+  }
+
+  if (!site) {
+    return res.status(400).json({ success: false, error: 'Site is required' });
+  }
+
+  if (!trimData.segments || !Array.isArray(trimData.segments) || trimData.segments.length === 0) {
+    return res.status(400).json({ success: false, error: 'segments array is required' });
+  }
+
+  // ตรวจสอบคิวที่รอ
+  const queuedCount = await Task.countDocuments({ status: 'queued' });
+  const processingCount = await Task.countDocuments({ status: 'processing' });
+  
+  // ตรวจสอบ system load
+  const systemLoad = await checkSystemLoad();
+  
+  if (queuedCount > 50) {
+    return res.status(429).json({ 
+      success: false, 
+      error: 'Queue is full. Please try again later.',
+      queueStatus: { queued: queuedCount, processing: processingCount }
+    });
+  }
+
+  // Fetch hostname data
+  let hostnameData;
+  let spaceData;
+  try {
+    hostnameData = await getHostnameData(site);
+    console.log('Fetched hostname data:', hostnameData);
+    if (!hostnameData) {
+      return res.status(404).json({ success: false, error: 'Hostname not found' });
+    }
+
+    spaceData = await getSpaceData(hostnameData.spaceId);
+    console.log('Fetched space data:', spaceData);
+    if (!spaceData) {
+      return res.status(404).json({ success: false, error: 'Space not found' });
+    }
+  } catch (error) {
+    console.error('Failed to fetch hostname/space data:', error);
+    return res.status(500).json({ success: false, error: 'Failed to fetch configuration data' });
+  }
+
+  try {
+    // Check for existing task
+    const existingTask = await Task.findOne({ 
+      url: trimData.input_url, 
+      type: 'trim',
+      'trimData.segments': { $elemMatch: { $in: trimData.segments.map(s => s.id) } }
+    });
+    
+    if (existingTask) {
+      console.log('Existing trim task found:', existingTask.taskId);
+      return res.json({ success: true, taskId: existingTask.taskId });
+    }
+
+    taskId = uuidv4();
+
+    // Construct task data with trim information
+    const taskData = {
+      taskId,
+      type: 'trim', // Add type to distinguish from regular convert tasks
+      status: 'queued',
+      quality: trimData.quality || '720p',
+      createdAt: Date.now(),
+      outputFile: null,
+      url: trimData.input_url,
+      trimData: trimData, // Store all trim data
+      site: hostnameData,
+      space: spaceData,
+      storage: trimData.storage,
+      retryCount: 0
+    };
+
+    console.log('Trim task data created:', { taskId, inputUrl: trimData.input_url, segments: trimData.segments.length });
+    await Task.create(taskData);
+
+    // อัปเดตข้อมูลในคอลเลกชัน storage
+    if (taskData.storage) {
+      await Storage.findOneAndUpdate(
+        { _id: new mongoose.Types.ObjectId(taskData.storage) },
+        { $set: { [`transcode.trim_${taskData.quality}`]: 'queue...' } },
+        { new: true }
+      ).exec();
+    }
+
+    console.log('Process trim queue started for task:', taskId);
+    // เริ่มประมวลผลทันทีหากมีช่องว่าง
+    if (concurrentJobs < MAX_CONCURRENT_JOBS) {
+      processTrimQueue(taskId, taskData);
+    }
+
+    res.json({ 
+      success: true, 
+      taskId, 
+      downloadLink: `${baseUrl}/outputs/${taskId}-trimmed.mp4`,
+      site: hostnameData,
+      space: spaceData,
+      queuePosition: queuedCount + 1,
+      segments: trimData.segments.length,
+      totalDuration: trimData.segments.reduce((sum, seg) => sum + seg.duration, 0)
+    });
+
+  } catch (error) {
+    console.error('Error in trim endpoint:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Internal server error',
+      details: error.message 
+    });
+  }
+});
+
+// Processing function for trim tasks
+async function processTrimQueue(taskId, taskData) {
+  // ตรวจสอบ system load ก่อนเริ่มงาน
+  const systemLoad = await checkSystemLoad();
+  if (!systemLoad.canProcess) {
+    console.log(`System overloaded (CPU: ${systemLoad.cpuUsage}%, Memory: ${systemLoad.memoryUsage}%). Trim task ${taskId} delayed.`);
+    setTimeout(() => processTrimQueue(taskId, taskData), 30000);
+    return;
+  }
+
+  // ตรวจสอบจำนวนงานที่กำลังทำพร้อมกัน
+  if (concurrentJobs >= MAX_CONCURRENT_JOBS) {
+    console.log(`Max concurrent jobs reached (${MAX_CONCURRENT_JOBS}). Trim task ${taskId} remains queued.`);
+    return;
+  }
+
+  concurrentJobs++;
+  console.log(`Processing trim queue for task: ${taskId} (Active jobs: ${concurrentJobs}/${MAX_CONCURRENT_JOBS})`);
+  
+  const trimData = taskData.trimData;
+  const outputFileName = trimData.filename || `${taskId}-trimmed.mp4`;
+  const outputPath = path.join(__dirname, 'outputs', outputFileName);
+  const inputPath = path.join('uploads', `${taskId}-input.mp4`);
+  let additionalInputs = []; // For storing overlay image paths
+
+  try {
+    console.log('Downloading video from URL:', trimData.input_url);
+    await Task.updateOne({ taskId }, { status: 'downloading' });
+    
+    if (taskData.storage) {
+      await Storage.findOneAndUpdate(
+        { _id: new mongoose.Types.ObjectId(taskData.storage) },
+        { $set: { [`transcode.trim_${taskData.quality}`]: 'downloading...' } },
+        { new: true }
+      ).exec();
+    }
+
+    try {
+      await downloadWithTimeout(trimData.input_url, inputPath);
+      console.log('Video downloaded to:', inputPath);
+    } catch (downloadError) {
+      console.error('Download failed for trim task:', taskId, downloadError);
+      throw new Error(`Download failed: ${downloadError.message}`);
+    }
+
+    await Task.updateOne({ taskId }, { status: 'processing' });
+    console.log('Trim task status updated to processing for task:', taskId);
+
+    const spaceData = JSON.parse(JSON.stringify(await getSpaceData(taskData.site.spaceId)));
+    taskData.space = spaceData;
+
+    // ตั้งค่า S3
+    const s3Client = new S3({
+      endpoint: `${taskData.space.s3EndpointDefault}`,
+      region: `${taskData.space.s3Region}`,
+      ResponseContentEncoding: "utf-8",
+      credentials: {
+        accessKeyId: taskData.space.s3Key,
+        secretAccessKey: taskData.space.s3Secret
+      },
+      forcePathStyle: false
+    });
+
+    // สร้าง FFmpeg command สำหรับ trimming
+    console.log('Starting FFmpeg trim process for task:', taskId);
+    console.log('Segments to process:', trimData.segments.length);
+    
+    let ffmpegCommand = ffmpeg(inputPath);
+
+    // กำหนด video size ตาม quality
+    let videoSize;
+    switch (trimData.quality) {
+      case '240p': videoSize = '426x240'; break;
+      case '420p': videoSize = '640x360'; break;
+      case '720p': videoSize = '1280x720'; break;
+      case '1080p': videoSize = '1920x1080'; break;
+      case '1920p': videoSize = '1920x1080'; break;
+      default: videoSize = '1280x720';
+    }
+
+    // สร้าง filter complex สำหรับ trim และ overlays
+    let filterComplex = [];
+    let inputs = ['0:v', '0:a'];
+
+    // ถ้ามี segments หลายส่วน ให้ทำการ trim แต่ละส่วนก่อน
+    if (trimData.trim_mode === 'multi' && trimData.segments.length > 1) {
+      // สร้าง trim filters สำหรับแต่ละ segment
+      trimData.segments.forEach((segment, index) => {
+        filterComplex.push(
+          `[0:v]trim=start=${segment.start}:end=${segment.end}:duration=${segment.duration},setpts=PTS-STARTPTS[v${index}]`,
+          `[0:a]atrim=start=${segment.start}:end=${segment.end}:duration=${segment.duration},asetpts=PTS-STARTPTS[a${index}]`
+        );
+      });
+
+      // รวม segments ทั้งหมด
+      const videoInputs = trimData.segments.map((_, i) => `[v${i}]`).join('');
+      const audioInputs = trimData.segments.map((_, i) => `[a${i}]`).join('');
+      
+      filterComplex.push(
+        `${videoInputs}concat=n=${trimData.segments.length}:v=1:a=0[trimmed_video]`,
+        `${audioInputs}concat=n=${trimData.segments.length}:v=0:a=1[trimmed_audio]`
+      );
+
+      inputs = ['[trimmed_video]', '[trimmed_audio]'];
+    } else if (trimData.segments.length === 1) {
+      // Single segment trim
+      const segment = trimData.segments[0];
+      filterComplex.push(
+        `[0:v]trim=start=${segment.start}:end=${segment.end}:duration=${segment.duration},setpts=PTS-STARTPTS[trimmed_video]`,
+        `[0:a]atrim=start=${segment.start}:end=${segment.end}:duration=${segment.duration},asetpts=PTS-STARTPTS[trimmed_audio]`
+      );
+      inputs = ['[trimmed_video]', '[trimmed_audio]'];
+    }
+
+    // เพิ่ม overlays ถ้ามี
+    let finalVideoInput = inputs[0];
+    let additionalInputs = [];
+    
+    if (trimData.overlays && trimData.overlays.length > 0) {
+      // Download image overlays ก่อน
+      for (let i = 0; i < trimData.overlays.length; i++) {
+        const overlay = trimData.overlays[i];
+        if (overlay.type === 'image' && overlay.content) {
+          const imageInputPath = path.join('uploads', `${taskId}-overlay-${i}.png`);
+          try {
+            console.log(`Downloading overlay image ${i}:`, overlay.content);
+            await downloadWithTimeout(overlay.content, imageInputPath, 30000); // 30 second timeout for images
+            additionalInputs.push(imageInputPath);
+            ffmpegCommand = ffmpegCommand.input(imageInputPath);
+          } catch (imageError) {
+            console.warn(`Failed to download overlay image ${i}:`, imageError.message);
+            // Continue without this overlay
+          }
+        }
+      }
+
+      // เพิ่ม overlay filters
+      let overlayInputIndex = 1; // เริ่มจาก input index 1 (0 คือ video หลัก)
+      trimData.overlays.forEach((overlay, index) => {
+        if (overlay.type === 'image' && additionalInputs[overlayInputIndex - 1]) {
+          // สำหรับ image overlay
+          const x = overlay.position?.x || 0;
+          const y = overlay.position?.y || 0;
+          const width = overlay.position?.width ? `:w=${overlay.position.width}` : '';
+          const height = overlay.position?.height ? `:h=${overlay.position.height}` : '';
+          const opacity = overlay.style?.opacity || 1;
+          
+          filterComplex.push(
+            `[${overlayInputIndex}:v]scale=${width}${height}[overlay_img${index}]`,
+            `${finalVideoInput}[overlay_img${index}]overlay=${x}:${y}:enable='between(t,${overlay.start_time},${overlay.end_time})':alpha=${opacity}[overlay${index}]`
+          );
+          finalVideoInput = `[overlay${index}]`;
+          overlayInputIndex++;
+        } else if (overlay.type === 'text') {
+          // สำหรับ text overlay
+          const fontsize = overlay.style?.font_size || 24;
+          const fontcolor = overlay.style?.color || 'white';
+          const x = overlay.position?.x || 10;
+          const y = overlay.position?.y || 10;
+          const text = overlay.content.replace(/'/g, "\\\\'"); // Escape single quotes
+          
+          let drawTextFilter = `drawtext=text='${text}':fontsize=${fontsize}:fontcolor=${fontcolor}:x=${x}:y=${y}`;
+          
+          // เพิ่ม text styling options
+          if (overlay.style?.font_family) {
+            drawTextFilter += `:fontfile=${overlay.style.font_family}`;
+          }
+          if (overlay.style?.text_shadow) {
+            drawTextFilter += `:shadowcolor=black:shadowx=2:shadowy=2`;
+          }
+          if (overlay.style?.opacity && overlay.style.opacity !== 1) {
+            drawTextFilter += `:alpha=${overlay.style.opacity}`;
+          }
+          
+          drawTextFilter += `:enable='between(t,${overlay.start_time},${overlay.end_time})'`;
+          
+          filterComplex.push(
+            `${finalVideoInput}${drawTextFilter}[text${index}]`
+          );
+          finalVideoInput = `[text${index}]`;
+        }
+      });
+    }
+
+    // Scale video ถ้าจำเป็น
+    if (videoSize !== `${trimData.video_metadata.width}x${trimData.video_metadata.height}`) {
+      filterComplex.push(`${finalVideoInput}scale=${videoSize}[scaled]`);
+      finalVideoInput = '[scaled]';
+    }
+
+    // Map final outputs
+    let mapOptions = [];
+    if (finalVideoInput.startsWith('[') && finalVideoInput.endsWith(']')) {
+      mapOptions.push('-map', finalVideoInput);
+    } else {
+      mapOptions.push('-map', '0:v');
+    }
+    mapOptions.push('-map', inputs[1] || '0:a');
+
+    // ตั้งค่า filter complex
+    if (filterComplex.length > 0) {
+      ffmpegCommand = ffmpegCommand.complexFilter(filterComplex);
+    }
+
+    // เพิ่ม options
+    ffmpegCommand = ffmpegCommand
+      .videoCodec('libx264')
+      .audioCodec('aac')
+      .outputOptions([
+        '-preset', 'fast',
+        '-crf', '23',
+        '-threads', '2',
+        '-movflags', '+faststart',
+        '-maxrate', '3M',
+        '-bufsize', '6M',
+        ...mapOptions
+      ]);
+
+    // ถ้ามี audio volume adjustment
+    if (trimData.audio_volume && trimData.audio_volume !== 1) {
+      ffmpegCommand = ffmpegCommand.audioFilters(`volume=${trimData.audio_volume}`);
+    }
+
+    // Event handlers
+    ffmpegCommand
+      .on('start', (commandLine) => {
+        console.log('Spawned FFmpeg trim with command: ' + commandLine);
+      })
+      .on('progress', async (progress) => {
+        const percent = Math.round(progress.percent) || 0;
+        console.log(`Trim processing progress for task ${taskId}: ${percent}%`);
+        await Task.updateOne({ taskId }, { status: 'processing', percent });
+
+        if (taskData.storage) {
+          await Storage.findOneAndUpdate(
+            { _id: new mongoose.Types.ObjectId(taskData.storage) },
+            { $set: { [`transcode.trim_${taskData.quality}`]: percent } },
+            { new: true }
+          ).exec();
+        }
+      })
+      .on('end', async () => {
+        try {
+          console.log('FFmpeg trim process completed for task:', taskId);
+          delete ffmpegProcesses[taskId];
+          
+          // คำนวณขนาดไฟล์หลังแปลง
+          const outputFileSize = fs.statSync(outputPath).size;
+          console.log(`Trim output file size: ${(outputFileSize / 1024 / 1024).toFixed(2)} MB`);
+          
+          await Task.updateOne({ 
+            taskId 
+          }, { 
+            status: 'completed', 
+            outputFile: `/${outputFileName}`,
+            outputFileSize: outputFileSize
+          });
+          
+          // อัปโหลดไปยัง S3
+          const fileContent = fs.readFileSync(outputPath);
+          const params = {
+            Bucket: `${taskData.space.s3Bucket}`,
+            Key: `outputs/${outputFileName}`,
+            Body: fileContent,
+            ACL: 'public-read'
+          };
+
+          const uploadResult = await s3Client.putObject(params);
+          const remoteUrl = `${taskData.space.s3Endpoint}outputs/${outputFileName}`;
+
+          if (taskData.storage) {
+            await Storage.findOneAndUpdate(
+              { _id: new mongoose.Types.ObjectId(taskData.storage) },
+              { $set: { [`transcode.trim_${taskData.quality}`]: remoteUrl } },
+              { new: true }
+            ).exec();
+          }
+
+          console.log("Trim storage updated with remote URL:", remoteUrl);
+          
+          // ทำความสะอาดไฟล์ชั่วคราว (รวมถึง overlay images)
+          await cleanupTempFiles(inputPath, outputPath);
+          
+          // ทำความสะอาด overlay image files
+          for (let i = 0; i < additionalInputs.length; i++) {
+            if (additionalInputs[i] && fs.existsSync(additionalInputs[i])) {
+              try {
+                fs.unlinkSync(additionalInputs[i]);
+                console.log('Cleaned up overlay image:', additionalInputs[i]);
+              } catch (cleanupError) {
+                console.error('Error cleaning up overlay image:', cleanupError);
+              }
+            }
+          }
+          
+        } catch (uploadError) {
+          console.error('Error in trim post-processing for task:', taskId, uploadError);
+          await Task.updateOne({ taskId }, { status: 'error', error: uploadError.message });
+        } finally {
+          concurrentJobs--;
+          console.log(`Trim task ${taskId} finished. Active jobs: ${concurrentJobs}/${MAX_CONCURRENT_JOBS}`);
+          processNextQueue();
+        }
+      })
+      .on('error', async (err) => {
+        try {
+          console.error('FFmpeg trim process error for task:', taskId, err);
+          delete ffmpegProcesses[taskId];
+          await Task.updateOne({ taskId }, { status: 'error', error: err.message });
+          
+          if (taskData.storage) {
+            await Storage.findOneAndUpdate(
+              { _id: new mongoose.Types.ObjectId(taskData.storage) },
+              { $set: { [`transcode.trim_${taskData.quality}`]: 'error' } },
+              { new: true }
+            ).exec();
+          }
+          
+          await cleanupTempFiles(inputPath, outputPath);
+          
+          // ทำความสะอาด overlay image files
+          for (let i = 0; i < (additionalInputs?.length || 0); i++) {
+            if (additionalInputs[i] && fs.existsSync(additionalInputs[i])) {
+              try {
+                fs.unlinkSync(additionalInputs[i]);
+                console.log('Cleaned up overlay image on error:', additionalInputs[i]);
+              } catch (cleanupError) {
+                console.error('Error cleaning up overlay image on error:', cleanupError);
+              }
+            }
+          }
+          
+        } catch (cleanupError) {
+          console.error('Error during trim cleanup for task:', taskId, cleanupError);
+        } finally {
+          concurrentJobs--;
+          console.log(`Trim task ${taskId} failed. Active jobs: ${concurrentJobs}/${MAX_CONCURRENT_JOBS}`);
+          processNextQueue();
+        }
+      });
+
+    // เก็บ reference ของ process และเพิ่ม timeout
+    ffmpegProcesses[taskId] = ffmpegCommand;
+    
+    // ตั้ง timeout สำหรับ ffmpeg process
+    const timeoutId = setTimeout(async () => {
+      if (ffmpegProcesses[taskId]) {
+        console.log(`FFmpeg trim timeout for task: ${taskId}`);
+        ffmpegProcesses[taskId].kill('SIGTERM');
+        delete ffmpegProcesses[taskId];
+        await Task.updateOne({ taskId }, { status: 'error', error: 'Processing timeout' });
+        await cleanupTempFiles(inputPath, outputPath);
+        concurrentJobs--;
+        processNextQueue();
+      }
+    }, FFMPEG_TIMEOUT);
+
+    // เริ่มการประมวลผล
+    ffmpegCommand.save(outputPath);
+
+  } catch (error) {
+    console.error('Error in processTrimQueue for task:', taskId, error);
+    await Task.updateOne({ taskId }, { status: 'error', error: error.message });
+    
+    if (taskData.storage) {
+      await Storage.findOneAndUpdate(
+        { _id: new mongoose.Types.ObjectId(taskData.storage) },
+        { $set: { [`transcode.trim_${taskData.quality}`]: 'error' } },
+        { new: true }
+      ).exec();
+    }
+    
+    await cleanupTempFiles(inputPath, outputPath);
+    concurrentJobs--;
+    console.log(`Trim task ${taskId} error. Active jobs: ${concurrentJobs}/${MAX_CONCURRENT_JOBS}`);
+    processNextQueue();
+  }
+}
 
