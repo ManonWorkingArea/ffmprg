@@ -93,9 +93,10 @@ const Storage = mongoose.model('storage', storageSchema, 'storage'); // Specify 
 let ffmpegProcesses = {}; // เก็บข้อมูลเกี่ยวกับกระบวนการ ffmpeg
 let isProcessing = false; // ตัวแปรเพื่อบอกสถานะการประมวลผล
 let concurrentJobs = 0; // ตัวนับงานที่กำลังทำพร้อมกัน
-const MAX_CONCURRENT_JOBS = 3; // จำกัดจำนวนงานพร้อมกัน
+// Configuration constants
+const MAX_CONCURRENT_JOBS = 2; // Sweet spot: Balance performance & stability // ทำงานทีละงานเพื่อประสิทธิภาพสูงสุด
 const DOWNLOAD_TIMEOUT = 30 * 60 * 1000; // 30 นาที สำหรับดาวน์โหลด
-const FFMPEG_TIMEOUT = 2 * 60 * 60 * 1000; // 2 ชั่วโมง สำหรับ ffmpeg
+const FFMPEG_TIMEOUT = 3 * 60 * 60 * 1000; // 3 ชั่วโมง สำหรับไฟล์ใหญ่
 
 const baseUrl = `http://159.65.131.165:${port}`; // อัปเดต base URL
 
@@ -204,12 +205,20 @@ app.post('/convert', upload.single('video'), async (req, res) => {
   const queuedCount = await Task.countDocuments({ status: 'queued' });
   const processingCount = await Task.countDocuments({ status: 'processing' });
   
+  // ตรวจสอบ system load
+  const systemLoad = await checkSystemLoad();
+  
   if (queuedCount > 50) { // จำกัดคิวไม่เกิน 50 งาน
     return res.status(429).json({ 
       success: false, 
       error: 'Queue is full. Please try again later.',
       queueStatus: { queued: queuedCount, processing: processingCount }
     });
+  }
+
+  // หากระบบโหลดหนัก แจ้งเตือนแต่ยังรับงาน
+  if (!systemLoad.canProcess) {
+    console.log(`Accepting job despite high load (CPU: ${systemLoad.cpuUsage}%, Memory: ${systemLoad.memoryUsage}%)`);
   }
 
   // Fetch hostname data
@@ -274,6 +283,8 @@ app.post('/convert', upload.single('video'), async (req, res) => {
       createdAt: Date.now(),
       outputFile: null,
       inputPath: req.file ? req.file.path : undefined,
+      inputFileSize: req.file ? req.file.size : null, // เพิ่มขนาดไฟล์ต้นฉบับ
+      outputFileSize: null, // จะอัปเดตหลังจากแปลงเสร็จ
       url: req.body.url,
       site: hostnameData,
       space: spaceData,
@@ -351,7 +362,19 @@ app.get('/status/:taskId', async (req, res) => {
 app.get('/tasks', async (req, res) => {
   try {
     const tasks = await Task.find(); // ดึงข้อมูลทั้งหมดจาก MongoDB
-    res.json({ success: true, tasks }); // คืนค่าข้อมูลทั้งหมด
+    
+    // เพิ่มข้อมูลขนาดไฟล์ที่อ่านง่าย
+    const enhancedTasks = tasks.map(task => {
+      const taskObj = task.toObject();
+      return {
+        ...taskObj,
+        inputFileSizeFormatted: formatFileSize(taskObj.inputFileSize),
+        outputFileSizeFormatted: formatFileSize(taskObj.outputFileSize),
+        compressionRatio: getCompressionRatio(taskObj.inputFileSize, taskObj.outputFileSize)
+      };
+    });
+    
+    res.json({ success: true, tasks: enhancedTasks }); // คืนค่าข้อมูลทั้งหมด
   } catch (error) {
     console.error('Error fetching tasks:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch tasks' });
@@ -403,6 +426,9 @@ app.get('/system-status', async (req, res) => {
     const completedTasks = await Task.countDocuments({ status: 'completed' });
     const errorTasks = await Task.countDocuments({ status: 'error' });
 
+    // ดึงข้อมูล system load
+    const systemLoad = await checkSystemLoad();
+
     res.json({
       success: true,
       system: {
@@ -410,7 +436,18 @@ app.get('/system-status', async (req, res) => {
         maxConcurrentJobs: MAX_CONCURRENT_JOBS,
         activeProcesses: Object.keys(ffmpegProcesses).length,
         downloadTimeout: DOWNLOAD_TIMEOUT / 1000, // in seconds
-        ffmpegTimeout: FFMPEG_TIMEOUT / 1000 // in seconds
+        ffmpegTimeout: FFMPEG_TIMEOUT / 1000, // in seconds
+        systemLoad: {
+          cpuUsage: systemLoad.cpuUsage,
+          memoryUsage: systemLoad.memoryUsage,
+          canProcess: systemLoad.canProcess,
+          thresholds: systemLoad.thresholds,
+          serverSpecs: {
+            cores: 4,
+            ramGB: 8,
+            diskGB: 120
+          }
+        }
       },
       tasks: {
         total: totalTasks,
@@ -513,28 +550,30 @@ app.get('/system-metrics', async (req, res) => {
 
     // แปลงค่าให้เป็นจำนวนเต็ม
     const usedMemoryMB = Math.round(memInfo.usedMemMb);
+    const totalMemoryMB = Math.round(memInfo.totalMemMb);
     const usedDiskGB = Math.round(diskInfo.usedGb);
+    const totalDiskGB = Math.round(diskInfo.totalGb);
     
-    // คำนวณเปอร์เซ็นต์การใช้งาน
-    const memoryPercent = Math.round((usedMemoryMB / 8192) * 100);
-    const diskPercent = Math.round((usedDiskGB / 120) * 100);
+    // คำนวณเปอร์เซ็นต์การใช้งานจากค่าจริง
+    const memoryPercent = Math.round((usedMemoryMB / totalMemoryMB) * 100);
+    const diskPercent = Math.round((usedDiskGB / totalDiskGB) * 100);
     
     res.json({
       cpu: {
-        cores: 4,
+        cores: 4, // ตาม server จริง
         usage: Math.round(cpuUsage), // ปัดเศษให้เป็นจำนวนเต็ม
         type: 'Regular Intel'
       },
       memory: {
-        total: 8192, // 8GB
+        total: totalMemoryMB, // ใช้ค่าจริงจากระบบ
         used: usedMemoryMB,
-        free: 8192 - usedMemoryMB,
+        free: totalMemoryMB - usedMemoryMB,
         usagePercent: memoryPercent
       },
       disk: {
-        total: 120, // 120GB
+        total: totalDiskGB, // ใช้ค่าจริงจากระบบ
         used: usedDiskGB,
-        free: 120 - usedDiskGB,
+        free: totalDiskGB - usedDiskGB,
         usagePercent: diskPercent,
         bandwidth: {
           total: 5120, // 5TB
@@ -542,7 +581,8 @@ app.get('/system-metrics', async (req, res) => {
         }
       },
       server: {
-        type: 'Basic',
+        type: 'DigitalOcean Basic',
+        specs: '4 CPU cores, 8GB RAM, 120GB SSD',
         price: {
           monthly: 48,
           hourly: 0.071
@@ -699,8 +739,50 @@ async function downloadWithTimeout(url, outputPath, timeout = DOWNLOAD_TIMEOUT) 
   });
 }
 
+// ฟังก์ชันตรวจสอบ system load
+async function checkSystemLoad() {
+  try {
+    const cpuUsage = await cpu.usage();
+    const memInfo = await mem.info();
+    
+    // ปรับเกณฑ์สำหรับ 2 concurrent jobs (optimal balance)
+    // CPU: หยุดเมื่อ > 85% (ลดจาก 90% เพื่อเสถียรภาพดีขึ้น)
+    // Memory: หยุดเมื่อ > 75% (ลดจาก 85% เพื่อ safety margin)
+    const cpuOverload = cpuUsage > 85;
+    const memoryUsagePercent = (memInfo.usedMemMb / memInfo.totalMemMb) * 100;
+    const memoryOverload = memoryUsagePercent > 75;
+    
+    return {
+      canProcess: !cpuOverload && !memoryOverload,
+      cpuUsage,
+      memoryUsage: memoryUsagePercent,
+      thresholds: {
+        cpu: 85,    // Optimized for 2 concurrent jobs
+        memory: 75  // Better safety margin
+      }
+    };
+  } catch (error) {
+    console.error('Error checking system load:', error);
+    return { 
+      canProcess: true, 
+      cpuUsage: 0, 
+      memoryUsage: 0,
+      thresholds: { cpu: 90, memory: 85 }
+    }; // Default to allow processing
+  }
+}
+
 // Processing function
 async function processQueue(taskId, taskData) {
+  // ตรวจสอบ system load ก่อนเริ่มงาน
+  const systemLoad = await checkSystemLoad();
+  if (!systemLoad.canProcess) {
+    console.log(`System overloaded (CPU: ${systemLoad.cpuUsage}%, Memory: ${systemLoad.memoryUsage}%). Task ${taskId} delayed.`);
+    // รอ 30 วินาทีแล้วลองใหม่
+    setTimeout(() => processQueue(taskId, taskData), 30000);
+    return;
+  }
+
   // ตรวจสอบจำนวนงานที่กำลังทำพร้อมกัน
   if (concurrentJobs >= MAX_CONCURRENT_JOBS) {
     console.log(`Max concurrent jobs reached (${MAX_CONCURRENT_JOBS}). Task ${taskId} remains queued.`);
@@ -773,7 +855,26 @@ async function processQueue(taskId, taskData) {
     const ffmpegProcess = ffmpeg(inputPath)
       .size(videoSize)
       .videoCodec('libx264')
-      .outputOptions(['-preset', 'veryfast', '-crf', '22'])
+      .outputOptions([
+        '-preset', 'fast',        // เปลี่ยนจาก medium เป็น fast เพื่อความเร็ว
+        '-crf', '23',             // ปรับจาก 24 เป็น 23 (คุณภาพดีขึ้นเล็กน้อย)
+        '-threads', '2',          // ใช้ 2 threads ต่องาน (2 งาน = 4 threads รวม)
+        '-movflags', '+faststart',// optimized for streaming
+        '-maxrate', '3M',         // เพิ่ม bitrate จาก 2M เป็น 3M
+        '-bufsize', '6M'          // เพิ่ม buffer จาก 4M เป็น 6M
+      ])
+      .on('start', (commandLine) => {
+        console.log('Spawned FFmpeg with command: ' + commandLine);
+        // ตั้งค่า nice priority ให้สูงขึ้น (ลด nice value)
+        if (process.platform !== 'win32') {
+          try {
+            const { spawn } = require('child_process');
+            spawn('renice', ['0', '-p', process.pid], { stdio: 'ignore' }); // ปรับเป็น 0 (normal priority)
+          } catch (error) {
+            console.log('Could not set process priority:', error.message);
+          }
+        }
+      })
       .on('progress', async (progress) => {
         const percent = Math.round(progress.percent) || 0;
         console.log(`Processing progress for task ${taskId}: ${percent}%`);
@@ -789,7 +890,18 @@ async function processQueue(taskId, taskData) {
         try {
           console.log('ffmpeg process completed for task:', taskId);
           delete ffmpegProcesses[taskId];
-          await Task.updateOne({ taskId }, { status: 'completed', outputFile: `/${outputFileName}` });
+          
+          // คำนวณขนาดไฟล์หลังแปลง
+          const outputFileSize = fs.statSync(outputPath).size;
+          console.log(`Output file size: ${(outputFileSize / 1024 / 1024).toFixed(2)} MB`);
+          
+          await Task.updateOne({ 
+            taskId 
+          }, { 
+            status: 'completed', 
+            outputFile: `/${outputFileName}`,
+            outputFileSize: outputFileSize // บันทึกขนาดไฟล์หลังแปลง
+          });
           
           // อัปโหลดไปยัง S3
           const fileContent = fs.readFileSync(outputPath);
@@ -893,6 +1005,15 @@ async function processNextQueue() {
     return;
   }
 
+  // ตรวจสอบ system load
+  const systemLoad = await checkSystemLoad();
+  if (!systemLoad.canProcess) {
+    console.log(`System overloaded (CPU: ${systemLoad.cpuUsage}%, Memory: ${systemLoad.memoryUsage}%). Delaying queue processing.`);
+    // รอ 1 นาทีแล้วลองใหม่
+    setTimeout(processNextQueue, 60000);
+    return;
+  }
+
   try {
     const nextTask = await Task.findOneAndUpdate(
       { status: 'queued' },
@@ -901,17 +1022,36 @@ async function processNextQueue() {
     );
     
     if (nextTask) {
-      console.log(`Found next task: ${nextTask.taskId}`);
-      // ไม่ต้องใช้ isProcessing เพราะใช้ concurrentJobs แทน
-      await processQueue(nextTask.taskId, nextTask);
+      console.log(`Found next task: ${nextTask.taskId} (System: CPU ${systemLoad.cpuUsage}%, Memory ${systemLoad.memoryUsage}%)`);
+      // เริ่มประมวลผลโดยมี delay เล็กน้อยเพื่อให้ระบบได้พัก
+      setTimeout(() => processQueue(nextTask.taskId, nextTask), 2000);
     } else {
       console.log('No queued tasks found');
     }
   } catch (error) {
     console.error('Error in processNextQueue:', error);
-    // หากเกิดข้อผิดพลาด ลอง process อีกครั้งในอีก 10 วินาที
-    setTimeout(processNextQueue, 10000);
+    // หากเกิดข้อผิดพลาด ลอง process อีกครั้งในอีก 30 วินาที
+    setTimeout(processNextQueue, 30000);
   }
+}
+
+// ฟังก์ชันสำหรับแปลงขนาดไฟล์ให้อ่านง่าย
+function formatFileSize(bytes) {
+  if (!bytes || bytes === 0) return 'N/A';
+  
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  
+  if (i === 0) return `${bytes} ${sizes[i]}`;
+  return `${(bytes / Math.pow(1024, i)).toFixed(2)} ${sizes[i]}`;
+}
+
+// ฟังก์ชันคำนวณเปอร์เซ็นต์การบีบอัด
+function getCompressionRatio(inputSize, outputSize) {
+  if (!inputSize || !outputSize) return null;
+  
+  const ratio = ((inputSize - outputSize) / inputSize * 100);
+  return ratio > 0 ? ratio.toFixed(1) : 0;
 }
 
 // เพิ่มฟังก์ชันสำหรับ retry งานที่ error

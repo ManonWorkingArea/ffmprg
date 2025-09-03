@@ -38,7 +38,7 @@
                 </div>
                 
                 <!-- การ์ดแสดงสถิติ -->
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+                <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
                     <div class="border rounded-lg p-4">
                         <p class="text-sm text-gray-500">งานทั้งหมด</p>
                         <p class="text-2xl font-medium mt-1">{{ stats.total }}</p>
@@ -57,6 +57,12 @@
                     <div class="border rounded-lg p-4">
                         <p class="text-sm text-gray-500">ผิดพลาด</p>
                         <p class="text-2xl font-medium mt-1 text-red-600">{{ stats.error }}</p>
+                    </div>
+
+                    <div class="border rounded-lg p-4">
+                        <p class="text-sm text-gray-500">ประหยัดพื้นที่</p>
+                        <p class="text-lg font-medium mt-1 text-green-600">{{ stats.totalSaved }}</p>
+                        <p class="text-xs text-gray-400">{{ stats.compressionRatio }}%</p>
                     </div>
                 </div>
 
@@ -127,6 +133,27 @@
                                 {{ systemStatus.system.concurrentJobs || 0 }} / {{ systemStatus.system.maxConcurrentJobs || 0 }}
                             </div>
                             <div class="text-xs text-gray-500 mt-1">Active / Max</div>
+                            
+                            <!-- แสดงสถานะ system load -->
+                            <div v-if="systemStatus.system.systemLoad" class="mt-2 pt-2 border-t">
+                                <div class="text-xs" 
+                                     :class="systemStatus.system.systemLoad.canProcess ? 'text-green-600' : 'text-red-600'">
+                                    <i :class="systemStatus.system.systemLoad.canProcess ? 'fas fa-check-circle' : 'fas fa-exclamation-triangle'"></i>
+                                    {{ systemStatus.system.systemLoad.canProcess ? 'ระบบปกติ' : 'ระบบโหลดหนัก' }}
+                                </div>
+                                <div class="text-xs text-gray-500 mt-1">
+                                    CPU: {{ Math.round(systemStatus.system.systemLoad.cpuUsage) }}%
+                                    <span :class="systemStatus.system.systemLoad.cpuUsage > (systemStatus.system.systemLoad.thresholds?.cpu || 85) ? 'text-red-500' : 'text-gray-500'">
+                                        (เกณฑ์: {{ systemStatus.system.systemLoad.thresholds?.cpu || 85 }}%)
+                                    </span>
+                                </div>
+                                <div class="text-xs text-gray-500">
+                                    Mem: {{ Math.round(systemStatus.system.systemLoad.memoryUsage) }}%
+                                    <span :class="systemStatus.system.systemLoad.memoryUsage > (systemStatus.system.systemLoad.thresholds?.memory || 80) ? 'text-red-500' : 'text-gray-500'">
+                                        (เกณฑ์: {{ systemStatus.system.systemLoad.thresholds?.memory || 80 }}%)
+                                    </span>
+                                </div>
+                            </div>
                         </div>
 
                         <div class="border rounded-lg p-4">
@@ -218,6 +245,12 @@
                                             <p>คุณภาพ: {{ task.quality }}</p>
                                             <p>สร้างเมื่อ: {{ formatDate(task.createdAt) }}</p>
                                             <p>สถานะ: {{ getStatusText(task.status) }}</p>
+                                            <p v-if="task.inputFileSizeFormatted">ขนาดต้นฉบับ: {{ task.inputFileSizeFormatted }}</p>
+                                            <p v-if="task.outputFileSizeFormatted && task.status === 'completed'">ขนาดหลังแปลง: {{ task.outputFileSizeFormatted }}</p>
+                                            <p v-if="task.compressionRatio && task.status === 'completed'" 
+                                               :class="task.compressionRatio > 0 ? 'text-green-600' : 'text-orange-600'">
+                                               {{ task.compressionRatio > 0 ? `ลดขนาด: ${task.compressionRatio}%` : 'ขนาดเพิ่มขึ้น' }}
+                                            </p>
                                         </div>
                                     </div>
                                     
@@ -297,7 +330,9 @@
                         total: 0,
                         processing: 0,
                         completed: 0,
-                        error: 0
+                        error: 0,
+                        totalSaved: 'N/A',
+                        compressionRatio: '0'
                     },
                     loading: true,
                     showNotification: false,
@@ -400,11 +435,31 @@
                 },
 
                 updateStats() {
+                    const completedTasks = this.tasks.filter(t => t.status === 'completed');
+                    
+                    // คำนวณขนาดไฟล์ที่ประหยัดได้
+                    let totalInputSize = 0;
+                    let totalOutputSize = 0;
+                    let validCompressions = 0;
+                    
+                    completedTasks.forEach(task => {
+                        if (task.inputFileSize && task.outputFileSize) {
+                            totalInputSize += task.inputFileSize;
+                            totalOutputSize += task.outputFileSize;
+                            validCompressions++;
+                        }
+                    });
+                    
+                    const totalSaved = totalInputSize - totalOutputSize;
+                    const compressionRatio = totalInputSize > 0 ? ((totalSaved / totalInputSize) * 100) : 0;
+                    
                     this.stats = {
                         total: this.tasks.length,
                         processing: this.tasks.filter(t => t.status === 'processing').length,
-                        completed: this.tasks.filter(t => t.status === 'completed').length,
-                        error: this.tasks.filter(t => t.status === 'error').length
+                        completed: completedTasks.length,
+                        error: this.tasks.filter(t => t.status === 'error').length,
+                        totalSaved: this.formatFileSize(totalSaved),
+                        compressionRatio: compressionRatio > 0 ? compressionRatio.toFixed(1) : '0'
                     }
                 },
 
@@ -461,6 +516,16 @@
                         hour: '2-digit',
                         minute: '2-digit'
                     })
+                },
+
+                formatFileSize(bytes) {
+                    if (!bytes || bytes === 0) return 'N/A';
+                    
+                    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+                    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+                    
+                    if (i === 0) return `${bytes} ${sizes[i]}`;
+                    return `${(bytes / Math.pow(1024, i)).toFixed(2)} ${sizes[i]}`;
                 },
 
                 getStatusIconColor(status) {
