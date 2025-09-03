@@ -18,8 +18,15 @@
     <div id="app">
         <!-- แจ้งเตือน -->
         <div v-if="showNotification"
-             class="fixed top-4 right-4 bg-gray-900 text-white px-4 py-2 rounded-md text-sm">
+             class="fixed top-4 right-4 bg-gray-900 text-white px-4 py-2 rounded-md text-sm z-50">
             {{ notificationMessage }}
+        </div>
+
+        <!-- แสดง API Errors -->
+        <div v-if="Object.values(apiErrors).some(error => error)"
+             class="fixed top-16 right-4 bg-red-500 text-white px-4 py-2 rounded-md text-sm z-40">
+            <i class="fas fa-exclamation-triangle mr-2"></i>
+            มีปัญหาการเชื่อมต่อ API
         </div>
 
         <div class="min-h-screen py-6 px-4">
@@ -186,6 +193,14 @@
                         
                         <!-- แสดงรายการงาน -->
                         <div v-else class="space-y-3">
+                            <!-- แสดงข้อความเมื่อไม่มีงาน -->
+                            <div v-if="tasks.length === 0" class="text-center py-8 text-gray-500">
+                                <i class="fas fa-inbox text-4xl mb-4 text-gray-300"></i>
+                                <p class="text-lg">ยังไม่มีงานในระบบ</p>
+                                <p class="text-sm">งานที่ส่งมาจะแสดงที่นี่</p>
+                            </div>
+                            
+                            <!-- แสดงรายการงาน -->
                             <div v-for="task in tasks" :key="task.taskId" 
                                  class="task-card border rounded-md p-4"
                                  :class="getStatusColor(task.status)">
@@ -287,6 +302,12 @@
                     loading: true,
                     showNotification: false,
                     notificationMessage: '',
+                    apiErrors: {
+                        tasks: false,
+                        systemMetrics: false,
+                        systemStatus: false,
+                        serverInfo: false
+                    },
                     systemMetrics: {
                         cpu: { usage: 0, cores: 0 },
                         memory: { total: 0, used: 0, free: 0, usagePercent: 0 },
@@ -347,16 +368,34 @@
             methods: {
                 async fetchTasks() {
                     try {
+                        console.log('Fetching tasks...'); // Debug log
                         const response = await fetch('/tasks')
+                        
+                        if (!response.ok) {
+                            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                        }
+                        
                         const data = await response.json()
-                        this.tasks = data.tasks.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+                        console.log('Tasks response:', data); // Debug log
+                        
+                        if (data.success) {
+                            this.tasks = data.tasks.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+                            console.log('Tasks loaded:', this.tasks.length); // Debug log
+                            this.apiErrors.tasks = false
+                        } else {
+                            console.error('Failed to fetch tasks:', data.error);
+                            this.apiErrors.tasks = true
+                        }
+                        
                         this.updateStats()
                         this.loading = false
                     } catch (error) {
                         console.error('เกิดข้อผิดพลาดในการดึงข้อมูล:', error)
+                        this.apiErrors.tasks = true
                         this.showNotification = true
-                        this.notificationMessage = 'เกิดข้อผิดพลาดในการดึงข้อมูล'
-                        setTimeout(() => this.showNotification = false, 3000)
+                        this.notificationMessage = `เกิดข้อผิดพลาดในการดึงข้อมูลงาน: ${error.message}`
+                        setTimeout(() => this.showNotification = false, 5000)
+                        this.loading = false
                     }
                 },
 
@@ -437,11 +476,20 @@
 
                 async fetchSystemMetrics() {
                     try {
+                        console.log('Fetching system metrics...'); // Debug log
                         const response = await fetch('/system-metrics')
+                        
+                        if (!response.ok) {
+                            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                        }
+                        
                         const data = await response.json()
+                        console.log('System metrics response:', data); // Debug log
                         this.systemMetrics = data
+                        this.apiErrors.systemMetrics = false
                     } catch (error) {
                         console.error('เกิดข้อผิดพลาดในการดึงข้อมูลระบบ:', error)
+                        this.apiErrors.systemMetrics = true
                     }
                 },
 
@@ -457,10 +505,14 @@
 
                 async fetchSystemStatus() {
                     try {
+                        console.log('Fetching system status...'); // Debug log
                         const response = await fetch('/system-status')
                         const data = await response.json()
+                        console.log('System status response:', data); // Debug log
                         if (data.success) {
                             this.systemStatus = data
+                        } else {
+                            console.error('Failed to fetch system status:', data.error);
                         }
                     } catch (error) {
                         console.error('เกิดข้อผิดพลาดในการดึงสถานะระบบ:', error)

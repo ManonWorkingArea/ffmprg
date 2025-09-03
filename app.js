@@ -502,14 +502,6 @@ app.use((error, req, res, next) => {
   });
 });
 
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({
-    success: false,
-    error: 'Endpoint not found'
-  });
-});
-
 // เพิ่ม endpoint ใหม่
 app.get('/system-metrics', async (req, res) => {
   try {
@@ -568,7 +560,7 @@ app.get('/server-info', (req, res) => {
   res.json({
     server: {
       framework: 'Express.js',
-      port: process.env.PORT || 3003,
+      port: process.env.PORT || 3000,
       baseUrl: `http://159.65.131.165:${port}`,
       storage: {
         database: 'MongoDB',
@@ -584,6 +576,14 @@ app.get('/server-info', (req, res) => {
       crfValue: 22,
       supportedResolutions: ['240p', '420p', '720p', '1080p', '1920p']
     }
+  });
+});
+
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({
+    success: false,
+    error: 'Endpoint not found'
   });
 });
 
