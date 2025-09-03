@@ -1379,6 +1379,7 @@ async function processTrimQueue(taskId, taskData) {
     // เพิ่ม overlays ถ้ามี
     let finalVideoInput = inputs[0];
     let additionalInputs = [];
+    let overlayInputIndex = 1; // เริ่มจาก input index 1 (0 คือ video หลัก)
     
     if (trimData.overlays && trimData.overlays.length > 0) {
       console.log(`Processing ${trimData.overlays.length} overlays for task ${taskId}`);
@@ -1394,6 +1395,7 @@ async function processTrimQueue(taskId, taskData) {
             additionalInputs.push(imageInputPath);
             ffmpegCommand = ffmpegCommand.input(imageInputPath);
             console.log(`Successfully added image input ${overlayInputIndex}:`, imageInputPath);
+            overlayInputIndex++;
           } catch (imageError) {
             console.warn(`Failed to download overlay image ${i}:`, imageError.message);
             // Continue without this overlay
@@ -1401,48 +1403,65 @@ async function processTrimQueue(taskId, taskData) {
         }
       }
 
+      // Reset overlay input index for filter processing
+      overlayInputIndex = 1;
+      let imageOverlayIndex = 0;
+      
       // เพิ่ม overlay filters
-      let overlayInputIndex = 1; // เริ่มจาก input index 1 (0 คือ video หลัก)
       trimData.overlays.forEach((overlay, index) => {
         console.log(`Processing overlay ${index}:`, overlay.type, overlay.content);
         
-        if (overlay.type === 'image' && additionalInputs[overlayInputIndex - 1]) {
+        if (overlay.type === 'image' && additionalInputs[imageOverlayIndex]) {
           // สำหรับ image overlay
-          const x = overlay.position?.x || 0;
-          const y = overlay.position?.y || 0;
-          const width = overlay.position?.width || 100;
-          const height = overlay.position?.height || 100;
+          const x = Math.round((overlay.position?.x || 0) * (trimData.video_metadata?.width || 1280) / 100);
+          const y = Math.round((overlay.position?.y || 0) * (trimData.video_metadata?.height || 720) / 100);
+          const width = Math.round((overlay.position?.width || 100) * (trimData.video_metadata?.width || 1280) / 100);
+          const height = Math.round((overlay.position?.height || 100) * (trimData.video_metadata?.height || 720) / 100);
           const opacity = overlay.style?.opacity || 1;
           
-          console.log(`Adding image overlay: ${width}x${height} at ${x},${y}`);
+          console.log(`Adding image overlay: ${width}x${height} at ${x},${y} with opacity ${opacity}`);
           
+          // Scale image with opacity
           filterComplex.push(
-            `[${overlayInputIndex}:v]scale=${width}:${height}[overlay_img${index}]`,
+            `[${overlayInputIndex}:v]scale=${width}:${height},format=rgba,colorchannelmixer=aa=${opacity}[overlay_img${index}]`
+          );
+          
+          // Apply overlay with time constraints
+          filterComplex.push(
             `${finalVideoInput}[overlay_img${index}]overlay=${x}:${y}:enable='between(t,${overlay.start_time},${overlay.end_time})'[overlay${index}]`
           );
+          
           finalVideoInput = `[overlay${index}]`;
           overlayInputIndex++;
+          imageOverlayIndex++;
         } else if (overlay.type === 'text') {
           // สำหรับ text overlay
           const fontsize = overlay.style?.font_size || 24;
           const fontcolor = overlay.style?.color || 'white';
-          const x = overlay.position?.x || 10;
-          const y = overlay.position?.y || 10;
-          const text = overlay.content.replace(/'/g, "\\\\'"); // Escape single quotes
+          const x = Math.round((overlay.position?.x || 10) * (trimData.video_metadata?.width || 1280) / 100);
+          const y = Math.round((overlay.position?.y || 10) * (trimData.video_metadata?.height || 720) / 100);
+          const text = overlay.content.replace(/'/g, "\\\\'").replace(/"/g, '\\\\"'); // Escape quotes
           
           console.log(`Adding text overlay: "${text}" at ${x},${y}, size ${fontsize}`);
           
           let drawTextFilter = `${finalVideoInput}drawtext=text='${text}':fontsize=${fontsize}:fontcolor=${fontcolor}:x=${x}:y=${y}`;
           
           // เพิ่ม text styling options
-          if (overlay.style?.font_family && overlay.style.font_family !== 'sans-serif') {
-            // Skip font file for now, use default fonts
+          if (overlay.style?.font_weight === 'bold') {
+            // Note: FFmpeg doesn't directly support font-weight, would need different font file
           }
           if (overlay.style?.text_shadow) {
             drawTextFilter += `:shadowcolor=black:shadowx=2:shadowy=2`;
           }
           if (overlay.style?.opacity && overlay.style.opacity !== 1) {
             drawTextFilter += `:alpha=${overlay.style.opacity}`;
+          }
+          
+          // Add text alignment
+          if (overlay.style?.text_align === 'center') {
+            drawTextFilter += `:x=(w-text_w)/2`;
+          } else if (overlay.style?.text_align === 'right') {
+            drawTextFilter += `:x=w-text_w-${x}`;
           }
           
           drawTextFilter += `:enable='between(t,${overlay.start_time},${overlay.end_time})'`;
