@@ -1410,16 +1410,22 @@ async function processTrimQueue(taskId, taskData) {
       // เพิ่ม overlay filters
       trimData.overlays.forEach((overlay, index) => {
         console.log(`Processing overlay ${index}:`, overlay.type, overlay.content);
+        console.log(`Overlay position:`, overlay.position);
+        console.log(`Video dimensions:`, trimData.video_metadata?.width, 'x', trimData.video_metadata?.height);
         
         if (overlay.type === 'image' && additionalInputs[imageOverlayIndex]) {
-          // สำหรับ image overlay
-          const x = Math.round((overlay.position?.x || 0) * (trimData.video_metadata?.width || 1280) / 100);
-          const y = Math.round((overlay.position?.y || 0) * (trimData.video_metadata?.height || 720) / 100);
-          const width = Math.round((overlay.position?.width || 100) * (trimData.video_metadata?.width || 1280) / 100);
-          const height = Math.round((overlay.position?.height || 100) * (trimData.video_metadata?.height || 720) / 100);
+          // สำหรับ image overlay - คำนวณตำแหน่งและขนาดจากเปอร์เซ็นต์
+          const videoWidth = trimData.video_metadata?.width || 1280;
+          const videoHeight = trimData.video_metadata?.height || 720;
+          
+          const x = Math.round((overlay.position?.x || 0) * videoWidth / 100);
+          const y = Math.round((overlay.position?.y || 0) * videoHeight / 100);
+          const width = Math.round((overlay.position?.width || 25) * videoWidth / 100);
+          const height = Math.round((overlay.position?.height || 25) * videoHeight / 100);
           const opacity = overlay.style?.opacity || 1;
           
-          console.log(`Adding image overlay: ${width}x${height} at ${x},${y} with opacity ${opacity}`);
+          console.log(`Image overlay calculated: ${width}x${height} at ${x},${y} with opacity ${opacity}`);
+          console.log(`Image overlay percentages: ${overlay.position?.width}% x ${overlay.position?.height}% at ${overlay.position?.x}%,${overlay.position?.y}%`);
           
           // Scale image with opacity
           filterComplex.push(
@@ -1435,16 +1441,34 @@ async function processTrimQueue(taskId, taskData) {
           overlayInputIndex++;
           imageOverlayIndex++;
         } else if (overlay.type === 'text') {
-          // สำหรับ text overlay
+          // สำหรับ text overlay - คำนวณตำแหน่งจากเปอร์เซ็นต์
+          const videoWidth = trimData.video_metadata?.width || 1280;
+          const videoHeight = trimData.video_metadata?.height || 720;
+          
           const fontsize = overlay.style?.font_size || 24;
           const fontcolor = overlay.style?.color || 'white';
-          const x = Math.round((overlay.position?.x || 10) * (trimData.video_metadata?.width || 1280) / 100);
-          const y = Math.round((overlay.position?.y || 10) * (trimData.video_metadata?.height || 720) / 100);
+          
+          // คำนวณตำแหน่งจากเปอร์เซ็นต์
+          let x = Math.round((overlay.position?.x || 10) * videoWidth / 100);
+          let y = Math.round((overlay.position?.y || 10) * videoHeight / 100);
+          
           const text = overlay.content.replace(/'/g, "\\\\'").replace(/"/g, '\\\\"'); // Escape quotes
           
-          console.log(`Adding text overlay: "${text}" at ${x},${y}, size ${fontsize}`);
+          console.log(`Text overlay calculated: "${text}" at ${x},${y} (${overlay.position?.x}%, ${overlay.position?.y}%), size ${fontsize}`);
+          console.log(`Text overlay style:`, overlay.style);
           
-          let drawTextFilter = `${finalVideoInput}drawtext=text='${text}':fontsize=${fontsize}:fontcolor=${fontcolor}:x=${x}:y=${y}`;
+          let drawTextFilter = `${finalVideoInput}drawtext=text='${text}':fontsize=${fontsize}:fontcolor=${fontcolor}`;
+          
+          // Handle text alignment - ปรับตำแหน่ง x ตาม text_align
+          if (overlay.style?.text_align === 'center') {
+            drawTextFilter += `:x=(w-text_w)/2`; // ใช้ width ทั้งหมด สำหรับ center
+          } else if (overlay.style?.text_align === 'right') {
+            drawTextFilter += `:x=w-text_w-${x}`; // จากขวา minus margin
+          } else {
+            drawTextFilter += `:x=${x}`; // left align ใช้ตำแหน่งตรงๆ
+          }
+          
+          drawTextFilter += `:y=${y}`;
           
           // เพิ่ม text styling options
           if (overlay.style?.font_weight === 'bold') {
@@ -1457,14 +1481,9 @@ async function processTrimQueue(taskId, taskData) {
             drawTextFilter += `:alpha=${overlay.style.opacity}`;
           }
           
-          // Add text alignment
-          if (overlay.style?.text_align === 'center') {
-            drawTextFilter += `:x=(w-text_w)/2`;
-          } else if (overlay.style?.text_align === 'right') {
-            drawTextFilter += `:x=w-text_w-${x}`;
-          }
-          
           drawTextFilter += `:enable='between(t,${overlay.start_time},${overlay.end_time})'`;
+          
+          console.log(`Generated text filter:`, drawTextFilter);
           
           filterComplex.push(
             `${drawTextFilter}[text${index}]`
