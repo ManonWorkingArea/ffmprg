@@ -619,14 +619,6 @@ app.get('/server-info', (req, res) => {
   });
 });
 
-// 404 handler
-app.use('*', (req, res) => {
-  res.status(404).json({
-    success: false,
-    error: 'Endpoint not found'
-  });
-});
-
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
   console.log(`Max concurrent jobs: ${MAX_CONCURRENT_JOBS}`);
@@ -1583,4 +1575,12 @@ async function processTrimQueue(taskId, taskData) {
     processNextQueue();
   }
 }
+
+// 404 handler - ต้องอยู่ท้ายสุดเสมอ
+app.use('*', (req, res) => {
+  res.status(404).json({
+    success: false,
+    error: 'Endpoint not found'
+  });
+});
 
