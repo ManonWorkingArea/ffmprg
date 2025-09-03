@@ -55,6 +55,7 @@ mongoose.connect('mongodb+srv://vue:Qazwsx1234!!@cloudmongodb.wpc62e9.mongodb.ne
 // สร้าง Schema และ Model สำหรับคิว
 const taskSchema = new mongoose.Schema({
   taskId: String,
+  type: { type: String, default: 'convert' }, // Type of task: 'convert' or 'trim'
   status: String,
   quality: String,
   createdAt: Date,
@@ -278,6 +279,7 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     // Construct task data with hostname reference
     const taskData = {
       taskId,
+      type: 'convert', // Add type to distinguish from trim tasks
       status: 'queued',
       quality,
       createdAt: Date.now(),
@@ -414,6 +416,69 @@ app.post('/stop/:taskId', async (req, res) => {
     return res.json({ success: true, message: `Process for task ${taskId} stopped.` });
   } else {
     return res.status(404).json({ success: false, error: 'Task not found or already completed.' });
+  }
+});
+
+// Endpoint: Delete completed task
+app.delete('/task/:taskId', async (req, res) => {
+  const taskId = req.params.taskId;
+  
+  try {
+    const task = await Task.findOne({ taskId });
+    
+    if (!task) {
+      return res.status(404).json({ success: false, error: 'Task not found' });
+    }
+    
+    // Only allow deletion of completed, error, or stopped tasks
+    if (!['completed', 'error', 'stopped'].includes(task.status)) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Can only delete completed, error, or stopped tasks' 
+      });
+    }
+    
+    // Clean up output file if exists
+    if (task.outputFile) {
+      const outputPath = path.join(__dirname, 'outputs', task.outputFile.replace('/', ''));
+      try {
+        if (fs.existsSync(outputPath)) {
+          fs.unlinkSync(outputPath);
+          console.log('Deleted output file:', outputPath);
+        }
+      } catch (fileError) {
+        console.error('Error deleting output file:', fileError);
+      }
+    }
+    
+    // Clean up input file if exists
+    if (task.inputPath) {
+      try {
+        if (fs.existsSync(task.inputPath)) {
+          fs.unlinkSync(task.inputPath);
+          console.log('Deleted input file:', task.inputPath);
+        }
+      } catch (fileError) {
+        console.error('Error deleting input file:', fileError);
+      }
+    }
+    
+    // Delete task from database
+    await Task.deleteOne({ taskId });
+    
+    console.log(`Task ${taskId} deleted successfully`);
+    res.json({ 
+      success: true, 
+      message: `Task ${taskId} deleted successfully` 
+    });
+    
+  } catch (error) {
+    console.error('Error deleting task:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to delete task',
+      details: error.message 
+    });
   }
 });
 
@@ -1316,6 +1381,8 @@ async function processTrimQueue(taskId, taskData) {
     let additionalInputs = [];
     
     if (trimData.overlays && trimData.overlays.length > 0) {
+      console.log(`Processing ${trimData.overlays.length} overlays for task ${taskId}`);
+      
       // Download image overlays ก่อน
       for (let i = 0; i < trimData.overlays.length; i++) {
         const overlay = trimData.overlays[i];
@@ -1326,6 +1393,7 @@ async function processTrimQueue(taskId, taskData) {
             await downloadWithTimeout(overlay.content, imageInputPath, 30000); // 30 second timeout for images
             additionalInputs.push(imageInputPath);
             ffmpegCommand = ffmpegCommand.input(imageInputPath);
+            console.log(`Successfully added image input ${overlayInputIndex}:`, imageInputPath);
           } catch (imageError) {
             console.warn(`Failed to download overlay image ${i}:`, imageError.message);
             // Continue without this overlay
@@ -1336,17 +1404,21 @@ async function processTrimQueue(taskId, taskData) {
       // เพิ่ม overlay filters
       let overlayInputIndex = 1; // เริ่มจาก input index 1 (0 คือ video หลัก)
       trimData.overlays.forEach((overlay, index) => {
+        console.log(`Processing overlay ${index}:`, overlay.type, overlay.content);
+        
         if (overlay.type === 'image' && additionalInputs[overlayInputIndex - 1]) {
           // สำหรับ image overlay
           const x = overlay.position?.x || 0;
           const y = overlay.position?.y || 0;
-          const width = overlay.position?.width ? `:w=${overlay.position.width}` : '';
-          const height = overlay.position?.height ? `:h=${overlay.position.height}` : '';
+          const width = overlay.position?.width || 100;
+          const height = overlay.position?.height || 100;
           const opacity = overlay.style?.opacity || 1;
           
+          console.log(`Adding image overlay: ${width}x${height} at ${x},${y}`);
+          
           filterComplex.push(
-            `[${overlayInputIndex}:v]scale=${width}${height}[overlay_img${index}]`,
-            `${finalVideoInput}[overlay_img${index}]overlay=${x}:${y}:enable='between(t,${overlay.start_time},${overlay.end_time})':alpha=${opacity}[overlay${index}]`
+            `[${overlayInputIndex}:v]scale=${width}:${height}[overlay_img${index}]`,
+            `${finalVideoInput}[overlay_img${index}]overlay=${x}:${y}:enable='between(t,${overlay.start_time},${overlay.end_time})'[overlay${index}]`
           );
           finalVideoInput = `[overlay${index}]`;
           overlayInputIndex++;
@@ -1358,11 +1430,13 @@ async function processTrimQueue(taskId, taskData) {
           const y = overlay.position?.y || 10;
           const text = overlay.content.replace(/'/g, "\\\\'"); // Escape single quotes
           
-          let drawTextFilter = `drawtext=text='${text}':fontsize=${fontsize}:fontcolor=${fontcolor}:x=${x}:y=${y}`;
+          console.log(`Adding text overlay: "${text}" at ${x},${y}, size ${fontsize}`);
+          
+          let drawTextFilter = `${finalVideoInput}drawtext=text='${text}':fontsize=${fontsize}:fontcolor=${fontcolor}:x=${x}:y=${y}`;
           
           // เพิ่ม text styling options
-          if (overlay.style?.font_family) {
-            drawTextFilter += `:fontfile=${overlay.style.font_family}`;
+          if (overlay.style?.font_family && overlay.style.font_family !== 'sans-serif') {
+            // Skip font file for now, use default fonts
           }
           if (overlay.style?.text_shadow) {
             drawTextFilter += `:shadowcolor=black:shadowx=2:shadowy=2`;
@@ -1374,11 +1448,13 @@ async function processTrimQueue(taskId, taskData) {
           drawTextFilter += `:enable='between(t,${overlay.start_time},${overlay.end_time})'`;
           
           filterComplex.push(
-            `${finalVideoInput}${drawTextFilter}[text${index}]`
+            `${drawTextFilter}[text${index}]`
           );
           finalVideoInput = `[text${index}]`;
         }
       });
+      
+      console.log(`Generated filter complex (${filterComplex.length} filters):`, filterComplex);
     }
 
     // Scale video ถ้าจำเป็น
@@ -1388,32 +1464,33 @@ async function processTrimQueue(taskId, taskData) {
     }
 
     // Map final outputs
-    let mapOptions = [];
-    if (finalVideoInput.startsWith('[') && finalVideoInput.endsWith(']')) {
-      mapOptions.push('-map', finalVideoInput);
-    } else {
-      mapOptions.push('-map', '0:v');
-    }
-    mapOptions.push('-map', inputs[1] || '0:a');
+    let outputOptions = [
+      '-preset', 'fast',
+      '-crf', '23',
+      '-threads', '2',
+      '-movflags', '+faststart',
+      '-maxrate', '3M',
+      '-bufsize', '6M'
+    ];
 
     // ตั้งค่า filter complex
     if (filterComplex.length > 0) {
       ffmpegCommand = ffmpegCommand.complexFilter(filterComplex);
+      
+      // Map final video and audio outputs
+      if (finalVideoInput.startsWith('[') && finalVideoInput.endsWith(']')) {
+        outputOptions.push('-map', finalVideoInput);
+      } else {
+        outputOptions.push('-map', '0:v');
+      }
+      outputOptions.push('-map', inputs[1] || '0:a');
     }
 
     // เพิ่ม options
     ffmpegCommand = ffmpegCommand
       .videoCodec('libx264')
       .audioCodec('aac')
-      .outputOptions([
-        '-preset', 'fast',
-        '-crf', '23',
-        '-threads', '2',
-        '-movflags', '+faststart',
-        '-maxrate', '3M',
-        '-bufsize', '6M',
-        ...mapOptions
-      ]);
+      .outputOptions(outputOptions);
 
     // ถ้ามี audio volume adjustment
     if (trimData.audio_volume && trimData.audio_volume !== 1) {
