@@ -1878,6 +1878,112 @@ app.post('/stream-upload', upload.none(), async (req, res) => {
   }
 });
 
+// Webhook endpoint for Cloudflare Stream status updates
+app.post('/webhook/cloudflare-stream', async (req, res) => {
+  console.log('Received Cloudflare Stream webhook:', JSON.stringify(req.body, null, 2));
+  
+  try {
+    const webhookData = req.body;
+    
+    // Validate webhook signature (optional but recommended)
+    // const signature = req.headers['cf-webhook-signature'];
+    // if (!validateWebhookSignature(req.body, signature)) {
+    //   return res.status(401).json({ error: 'Invalid signature' });
+    // }
+    
+    const { uid, status, meta } = webhookData;
+    
+    if (!uid) {
+      return res.status(400).json({ error: 'Missing video UID' });
+    }
+    
+    // Find task by cloudflareStreamId
+    const task = await Task.findOne({ cloudflareStreamId: uid });
+    
+    if (!task) {
+      console.log(`No task found for Cloudflare Stream UID: ${uid}`);
+      return res.status(200).json({ message: 'Task not found, but webhook acknowledged' });
+    }
+    
+    console.log(`Webhook update for task ${task.taskId}: status=${status?.state}, ready=${status?.readyToStream}`);
+    
+    // Update task based on webhook status
+    if (status?.state === 'ready' && status?.readyToStream) {
+      // Video is ready for streaming
+      await Task.updateOne({ taskId: task.taskId }, {
+        status: 'completed',
+        percent: 100,
+        cloudflareStreamStatus: 'ready',
+        cloudflareStreamMeta: {
+          ...task.cloudflareStreamMeta,
+          webhookData: webhookData,
+          completedAt: new Date().toISOString()
+        }
+      });
+      
+      // Update storage with final stream URL
+      if (task.storage) {
+        const streamUrl = `https://customer-${uid}.cloudflarestream.com/${uid}/watch`;
+        await safeUpdateTranscode(task.storage, 'stream', streamUrl, true);
+      }
+      
+      console.log(`✅ Cloudflare Stream task ${task.taskId} completed via webhook`);
+      
+    } else if (status?.state === 'error') {
+      // Video processing failed
+      await Task.updateOne({ taskId: task.taskId }, {
+        status: 'error',
+        error: status?.errorReasonText || 'Cloudflare Stream processing failed',
+        cloudflareStreamStatus: 'error',
+        cloudflareStreamMeta: {
+          ...task.cloudflareStreamMeta,
+          webhookData: webhookData,
+          errorAt: new Date().toISOString()
+        }
+      });
+      
+      // Update storage with error status
+      if (task.storage) {
+        await safeUpdateTranscode(task.storage, 'stream', 'error', true);
+      }
+      
+      console.log(`❌ Cloudflare Stream task ${task.taskId} failed via webhook: ${status?.errorReasonText}`);
+      
+    } else if (status?.state === 'inprogress') {
+      // Video is still processing
+      const percent = Math.min(50 + Math.floor(Math.random() * 40), 95); // Estimate progress 50-95%
+      await Task.updateOne({ taskId: task.taskId }, {
+        status: 'processing',
+        percent: percent,
+        cloudflareStreamStatus: 'inprogress',
+        cloudflareStreamMeta: {
+          ...task.cloudflareStreamMeta,
+          webhookData: webhookData,
+          lastUpdate: new Date().toISOString()
+        }
+      });
+      
+      console.log(`⏳ Cloudflare Stream task ${task.taskId} still processing via webhook (${percent}%)`);
+    }
+    
+    // Acknowledge webhook
+    res.status(200).json({ 
+      success: true, 
+      message: 'Webhook processed successfully',
+      taskId: task.taskId,
+      uid: uid,
+      status: status?.state
+    });
+    
+  } catch (error) {
+    console.error('Error processing Cloudflare Stream webhook:', error);
+    res.status(500).json({ 
+      error: 'Webhook processing failed',
+      details: error.message 
+    });
+  }
+});
+
 // Endpoint: Get Cloudflare Stream video info
 app.get('/stream-info/:streamId', async (req, res) => {
   const streamId = req.params.streamId;
@@ -1962,7 +2068,8 @@ async function processCloudflareStreamQueue(taskId, taskData) {
     const formData = new FormData();
     formData.append('file', fs.createReadStream(tempFilePath));
     
-    // Add metadata
+    // Add metadata with webhook URL
+    const webhookUrl = `${baseUrl}/webhook/cloudflare-stream`;
     const metadata = {
       name: taskData.cloudflareStreamMeta.title,
       meta: {
@@ -1970,7 +2077,9 @@ async function processCloudflareStreamQueue(taskId, taskData) {
         source: taskData.cloudflareStreamMeta.originalUrl,
         uploadedBy: 'ffmprg-system',
         taskId: taskId
-      }
+      },
+      // Set webhook URL for status updates
+      webhookUrl: webhookUrl
     };
     
     formData.append('meta', JSON.stringify(metadata));
@@ -1979,6 +2088,7 @@ async function processCloudflareStreamQueue(taskId, taskData) {
     const uploadUrl = `${CLOUDFLARE_API_BASE}/accounts/${CLOUDFLARE_ACCOUNT_ID}/stream`;
     
     console.log(`Uploading to Cloudflare Stream: ${uploadUrl}`);
+    console.log(`Webhook URL configured: ${webhookUrl}`);
     
     const uploadResponse = await axios.post(uploadUrl, formData, {
       headers: {
@@ -2002,37 +2112,46 @@ async function processCloudflareStreamQueue(taskId, taskData) {
     if (uploadResponse.data.success) {
       const streamData = uploadResponse.data.result;
       
-      // Update task with Cloudflare Stream data
+      // Update task with Cloudflare Stream data - initial status
       await Task.updateOne({ taskId }, { 
-        status: 'completed', 
-        percent: 100,
+        status: 'processing', 
+        percent: 80, // Upload completed, now waiting for processing
         cloudflareStreamId: streamData.uid,
         cloudflarePlaybackUrl: `https://customer-${streamData.uid}.cloudflarestream.com/${streamData.uid}/manifest/video.m3u8`,
-        cloudflareStreamStatus: streamData.status.state,
+        cloudflareStreamStatus: streamData.status?.state || 'pending',
         cloudflareStreamMeta: {
           ...taskData.cloudflareStreamMeta,
-          cloudflareData: streamData
-        },
-        completedAt: Date.now()
+          cloudflareData: streamData,
+          uploadedAt: new Date().toISOString(),
+          webhookConfigured: true
+        }
       });
 
       console.log(`Cloudflare Stream upload completed for task: ${taskId}`);
       console.log(`Stream ID: ${streamData.uid}`);
-      console.log(`Playback URL: https://customer-${streamData.uid}.cloudflarestream.com/${streamData.uid}/manifest/video.m3u8`);
-
-      // Update storage with stream URL if storage ID provided
-      if (taskData.storage) {
-        try {
-          const playbackUrl = `https://customer-${streamData.uid}.cloudflarestream.com/${streamData.uid}/manifest/video.m3u8`;
-          await safeUpdateTranscode(taskData.storage, 'stream', playbackUrl, true);
-          console.log(`Updated storage ${taskData.storage} with playback URL: ${playbackUrl}`);
-        } catch (storageError) {
-          console.error(`Failed to update storage ${taskData.storage}:`, storageError.message);
-        }
-      }
+      console.log(`Initial status: ${streamData.status?.state}`);
+      console.log(`Webhook will handle status updates automatically`);
 
       // Clean up temp file
       await cleanupTempFiles(tempFilePath, null);
+
+      // Check if already ready (unlikely but possible)
+      if (streamData.status?.state === 'ready' && streamData.readyToStream) {
+        await Task.updateOne({ taskId }, { 
+          status: 'completed', 
+          percent: 100,
+          cloudflareStreamStatus: 'ready'
+        });
+        
+        if (taskData.storage) {
+          const streamUrl = `https://customer-${streamData.uid}.cloudflarestream.com/${streamData.uid}/watch`;
+          await safeUpdateTranscode(taskData.storage, 'stream', streamUrl, true);
+        }
+        
+        console.log(`✅ Stream was already ready: ${streamData.uid}`);
+      } else {
+        console.log(`⏳ Stream processing initiated. Waiting for webhook updates: ${streamData.uid}`);
+      }
 
     } else {
       throw new Error(`Cloudflare Stream upload failed: ${uploadResponse.data.errors?.map(e => e.message).join(', ') || 'Unknown error'}`);
