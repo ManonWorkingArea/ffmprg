@@ -823,6 +823,82 @@ app.listen(port, () => {
   processNextQueue();
 });
 
+// Endpoint: Force stop all jobs and reset system
+app.post('/force-reset', async (req, res) => {
+  try {
+    // หยุด ffmpeg processes ทั้งหมด
+    const processIds = Object.keys(ffmpegProcesses);
+    for (const taskId of processIds) {
+      try {
+        ffmpegProcesses[taskId].kill('SIGKILL'); // บังคับหยุด
+        delete ffmpegProcesses[taskId];
+        console.log(`Force killed process for task: ${taskId}`);
+      } catch (error) {
+        console.error(`Error killing process ${taskId}:`, error.message);
+      }
+    }
+    
+    // Reset concurrent jobs counter
+    concurrentJobs = 0;
+    
+    // อัปเดต tasks ที่ค้างใน processing กลับเป็น queued
+    const processingTasks = await Task.updateMany(
+      { status: 'processing' },
+      { $set: { status: 'queued' } }
+    );
+    
+    console.log(`Force reset completed. Reset ${processingTasks.modifiedCount} processing tasks to queued.`);
+    
+    // เริ่ม process queue ใหม่
+    setTimeout(processNextQueue, 2000);
+    
+    res.json({ 
+      success: true, 
+      message: `System reset successfully. Killed ${processIds.length} processes and reset ${processingTasks.modifiedCount} tasks.`,
+      resetProcesses: processIds.length,
+      resetTasks: processingTasks.modifiedCount
+    });
+  } catch (error) {
+    console.error('Error in force reset:', error);
+    res.status(500).json({ success: false, error: 'Internal server error during reset.' });
+  }
+});
+
+// Endpoint: Get system status for debugging
+app.get('/system-status', async (req, res) => {
+  try {
+    const queuedTasks = await Task.countDocuments({ status: 'queued' });
+    const processingTasks = await Task.countDocuments({ status: 'processing' });
+    const completedTasks = await Task.countDocuments({ status: 'completed' });
+    const errorTasks = await Task.countDocuments({ status: 'error' });
+    const stoppedTasks = await Task.countDocuments({ status: 'stopped' });
+    
+    const systemLoad = await checkSystemLoad();
+    const runningProcesses = Object.keys(ffmpegProcesses);
+    
+    res.json({
+      success: true,
+      status: {
+        concurrentJobs,
+        maxConcurrentJobs: MAX_CONCURRENT_JOBS,
+        canProcessMore: concurrentJobs < MAX_CONCURRENT_JOBS,
+        systemLoad,
+        runningProcesses,
+        taskCounts: {
+          queued: queuedTasks,
+          processing: processingTasks,
+          completed: completedTasks,
+          error: errorTasks,
+          stopped: stoppedTasks
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error getting system status:', error);
+    res.status(500).json({ success: false, error: 'Internal server error.' });
+  }
+});
+
 // Graceful shutdown
 process.on('SIGTERM', gracefulShutdown);
 process.on('SIGINT', gracefulShutdown);
@@ -1185,22 +1261,31 @@ function calculatePercent(taskData) {
 
 // ฟังก์ชันใหม่สำหรับจัดการคิวถัดไป (ปรับปรุงแล้ว)
 async function processNextQueue() {
+  console.log(`=== ProcessNextQueue called ===`);
+  console.log(`Current state: concurrentJobs=${concurrentJobs}, MAX_CONCURRENT_JOBS=${MAX_CONCURRENT_JOBS}`);
+  
   // ตรวจสอบว่าสามารถรับงานใหม่ได้หรือไม่
   if (concurrentJobs >= MAX_CONCURRENT_JOBS) {
-    console.log(`Cannot process next queue: ${concurrentJobs}/${MAX_CONCURRENT_JOBS} jobs active`);
+    console.log(`❌ Cannot process next queue: ${concurrentJobs}/${MAX_CONCURRENT_JOBS} jobs active`);
     return;
   }
 
   // ตรวจสอบ system load
   const systemLoad = await checkSystemLoad();
+  console.log(`System Load: CPU ${systemLoad.cpuUsage}%, Memory ${systemLoad.memoryUsage}%, Can Process: ${systemLoad.canProcess}`);
+  
   if (!systemLoad.canProcess) {
-    console.log(`System overloaded (CPU: ${systemLoad.cpuUsage}%, Memory: ${systemLoad.memoryUsage}%). Delaying queue processing.`);
+    console.log(`❌ System overloaded (CPU: ${systemLoad.cpuUsage}%, Memory: ${systemLoad.memoryUsage}%). Delaying queue processing for 60 seconds.`);
     // รอ 1 นาทีแล้วลองใหม่
     setTimeout(processNextQueue, 60000);
     return;
   }
 
   try {
+    console.log(`🔍 Looking for queued tasks...`);
+    const queuedCount = await Task.countDocuments({ status: 'queued' });
+    console.log(`Found ${queuedCount} queued tasks in database`);
+    
     const nextTask = await Task.findOneAndUpdate(
       { status: 'queued' },
       { $set: { status: 'processing' } },
@@ -1208,24 +1293,29 @@ async function processNextQueue() {
     );
     
     if (nextTask) {
-      console.log(`Found next task: ${nextTask.taskId} (Type: ${nextTask.type || 'convert'}) (System: CPU ${systemLoad.cpuUsage}%, Memory ${systemLoad.memoryUsage}%)`);
+      console.log(`✅ Found next task: ${nextTask.taskId} (Type: ${nextTask.type || 'convert'}) (System: CPU ${systemLoad.cpuUsage}%, Memory ${systemLoad.memoryUsage}%)`);
+      console.log(`Task details: Created at ${nextTask.createdAt}, Quality: ${nextTask.quality || 'N/A'}`);
       
       // เลือก processing function ตาม task type
       setTimeout(() => {
         if (nextTask.type === 'trim') {
+          console.log(`🎬 Starting trim processing for task: ${nextTask.taskId}`);
           processTrimQueue(nextTask.taskId, nextTask);
         } else {
+          console.log(`🎬 Starting convert processing for task: ${nextTask.taskId}`);
           processQueue(nextTask.taskId, nextTask);
         }
       }, 2000);
     } else {
-      console.log('No queued tasks found');
+      console.log(`ℹ️  No queued tasks found to process`);
     }
   } catch (error) {
-    console.error('Error in processNextQueue:', error);
+    console.error('❌ Error in processNextQueue:', error);
     // หากเกิดข้อผิดพลาด ลอง process อีกครั้งในอีก 30 วินาที
     setTimeout(processNextQueue, 30000);
   }
+  
+  console.log(`=== ProcessNextQueue completed ===`);
 }
 
 // ฟังก์ชันสำหรับแปลงขนาดไฟล์ให้อ่านง่าย

@@ -198,6 +198,18 @@
                             <i class="fas fa-trash mr-1"></i>
                             Cleanup Old Tasks
                         </button>
+                        
+                        <button @click="forceReset" 
+                                class="text-xs px-3 py-1.5 bg-red-500 text-white rounded hover:bg-red-600">
+                            <i class="fas fa-power-off mr-1"></i>
+                            Force Reset System
+                        </button>
+                        
+                        <button @click="checkSystemStatus" 
+                                class="text-xs px-3 py-1.5 bg-green-500 text-white rounded hover:bg-green-600">
+                            <i class="fas fa-info-circle mr-1"></i>
+                            Check Status
+                        </button>
                     </div>
                 </div>
 
@@ -781,6 +793,56 @@
                         this.showNotification = true
                         this.notificationMessage = 'เกิดข้อผิดพลาดในการ cleanup งาน'
                         setTimeout(() => this.showNotification = false, 3000)
+                    }
+                },
+                
+                async forceReset() {
+                    if (!confirm('คุณแน่ใจหรือไม่ที่จะ Force Reset ระบบ? การกระทำนี้จะหยุดงานทั้งหมดและรีเซ็ตระบบ')) {
+                        return
+                    }
+                    
+                    try {
+                        const response = await fetch('/force-reset', { method: 'POST' })
+                        const data = await response.json()
+                        if (data.success) {
+                            this.showNotification = true
+                            this.notificationMessage = `Reset สำเร็จ: หยุด ${data.resetProcesses} processes และ reset ${data.resetTasks} tasks`
+                            setTimeout(() => this.showNotification = false, 5000)
+                            this.fetchTasks()
+                            this.fetchSystemStatus()
+                        } else {
+                            throw new Error(data.error || 'Unknown error')
+                        }
+                    } catch (error) {
+                        console.error('เกิดข้อผิดพลาดในการ Force Reset:', error)
+                        this.showNotification = true
+                        this.notificationMessage = 'เกิดข้อผิดพลาดในการ Force Reset: ' + error.message
+                        setTimeout(() => this.showNotification = false, 5000)
+                    }
+                },
+                
+                async checkSystemStatus() {
+                    try {
+                        const response = await fetch('/system-status')
+                        const data = await response.json()
+                        if (data.success) {
+                            console.log('System Status:', data.status)
+                            this.showNotification = true
+                            this.notificationMessage = `System Status: 
+                                Concurrent Jobs: ${data.status.concurrentJobs}/${data.status.maxConcurrentJobs}
+                                Running Processes: ${data.status.runningProcesses.length}
+                                Queued Tasks: ${data.status.taskCounts.queued}
+                                Processing Tasks: ${data.status.taskCounts.processing}
+                                CPU: ${data.status.systemLoad.cpuUsage}%, Memory: ${data.status.systemLoad.memoryUsage}%`
+                            setTimeout(() => this.showNotification = false, 8000)
+                        } else {
+                            throw new Error(data.error || 'Unknown error')
+                        }
+                    } catch (error) {
+                        console.error('เกิดข้อผิดพลาดในการตรวจสอบสถานะ:', error)
+                        this.showNotification = true
+                        this.notificationMessage = 'เกิดข้อผิดพลาดในการตรวจสอบสถานะ: ' + error.message
+                        setTimeout(() => this.showNotification = false, 5000)
                     }
                 }
             }
