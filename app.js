@@ -64,7 +64,16 @@ const taskSchema = new mongoose.Schema({
   url: String,
   site: Object,
   space: Object,
-  storage: String
+  storage: String,
+  // เพิ่มฟิลด์สำหรับ video trimming
+  type: { type: String, default: 'convert' }, // 'convert' หรือ 'trim'
+  startTime: String,  // เวลาเริ่มต้นสำหรับ trim
+  endTime: String,    // เวลาสิ้นสุดสำหรับ trim
+  originalFilename: String, // ชื่อไฟล์ต้นฉบับ
+  // เพิ่มฟิลด์สำหรับ text และ image overlay
+  textOverlay: Object,  // ข้อมูล text overlay
+  imageOverlay: Object, // ข้อมูล image overlay
+  error: String        // ข้อผิดพลาด (ถ้ามี)
 });
 
 const Task = mongoose.model('Queue', taskSchema);
@@ -127,6 +136,35 @@ function selectThaiFont() {
   const fallbackPath = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf';
   console.log(`⚠️  Using fallback font: ${fallbackPath}`);
   return { path: fallbackPath, name: 'DejaVu Sans', description: 'Fallback font' };
+}
+
+// ฟังก์ชันคำนวณระยะเวลาสำหรับการตัดต่อวิดีโอ
+function calculateDuration(startTime, endTime) {
+  // แปลงเวลาเป็นวินาที
+  function timeToSeconds(time) {
+    if (typeof time === 'number') return time;
+    
+    // รองรับรูปแบบ HH:MM:SS, MM:SS, หรือ SS
+    const parts = time.toString().split(':').reverse();
+    let seconds = 0;
+    
+    if (parts[0]) seconds += parseFloat(parts[0]); // วินาที
+    if (parts[1]) seconds += parseInt(parts[1]) * 60; // นาที
+    if (parts[2]) seconds += parseInt(parts[2]) * 3600; // ชั่วโมง
+    
+    return seconds;
+  }
+  
+  const startSeconds = timeToSeconds(startTime);
+  const endSeconds = timeToSeconds(endTime);
+  const duration = endSeconds - startSeconds;
+  
+  if (duration <= 0) {
+    throw new Error('End time must be greater than start time');
+  }
+  
+  console.log(`📐 Duration calculation: ${startTime} (${startSeconds}s) - ${endTime} (${endSeconds}s) = ${duration}s`);
+  return duration;
 }
 
 let ffmpegProcesses = {}; // เก็บข้อมูลเกี่ยวกับกระบวนการ ffmpeg
@@ -539,6 +577,75 @@ app.delete('/cleanup-old-tasks', async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to cleanup old tasks' });
+  }
+});
+
+// Endpoint สำหรับตัดต่อวิดีโอ (Video Trimming)
+app.post('/trim', upload.single('video'), async (req, res) => {
+  const taskId = uuidv4();
+  
+  try {
+    if (!req.file) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'No video file provided' 
+      });
+    }
+
+    // รับพารามิเตอร์การตัดต่อ
+    const { startTime, endTime, quality = '720p' } = req.body;
+    
+    if (!startTime || !endTime) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Start time and end time are required (format: HH:MM:SS or seconds)' 
+      });
+    }
+
+    // ตรวจสอบรูปแบบเวลา
+    const timeRegex = /^(\d{1,2}:)?(\d{1,2}:)?\d{1,2}(\.\d+)?$/;
+    if (!timeRegex.test(startTime) || !timeRegex.test(endTime)) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Invalid time format. Use HH:MM:SS or seconds' 
+      });
+    }
+
+    // สร้าง task ใหม่
+    const newTask = new Task({
+      taskId,
+      originalFilename: req.file.originalname,
+      inputPath: req.file.path,
+      quality,
+      startTime,
+      endTime,
+      type: 'trim', // เพิ่มประเภทงาน
+      status: 'queued',
+      percent: 0,
+      createdAt: new Date()
+    });
+
+    await newTask.save();
+    console.log(`✂️ Video trim task created: ${taskId} (${startTime} - ${endTime})`);
+
+    // เริ่มประมวลผลคิว
+    processNextQueue();
+
+    res.json({ 
+      success: true, 
+      taskId, 
+      message: 'Video trim task queued successfully',
+      startTime,
+      endTime,
+      quality
+    });
+
+  } catch (error) {
+    console.error('Error creating trim task:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Internal server error: ' + error.message 
+    });
   }
 });
 
@@ -1042,19 +1149,45 @@ async function processQueue(taskId, taskData) {
       ffmpegCommand = ffmpegCommand.input(taskData.imageOverlay.imagePath);
     }
     
-    const ffmpegProcess = ffmpegCommand
-      .size(videoSize)
-      .videoCodec('libx264')
-      .outputOptions([
-        '-preset', 'fast',        // เปลี่ยนจาก medium เป็น fast เพื่อความเร็ว
-        '-crf', '23',             // ปรับจาก 24 เป็น 23 (คุณภาพดีขึ้นเล็กน้อย)
-        '-threads', '2',          // ใช้ 2 threads ต่องาน (2 งาน = 4 threads รวม)
-        '-movflags', '+faststart',// optimized for streaming
-        '-maxrate', '3M',         // เพิ่ม bitrate จาก 2M เป็น 3M
-        '-bufsize', '6M',         // เพิ่ม buffer จาก 4M เป็น 6M
-        ...(filterComplexArray.length > 0 ? ['-filter_complex', filterComplexArray.join(';')] : []),
-        ...(taskData.imageOverlay ? ['-map', '[final]'] : taskData.textOverlay ? ['-map', '[text_overlay]'] : [])
-      ])
+    // ปรับแต่งการประมวลผลตามประเภทงาน
+    let ffmpegProcess;
+    
+    if (taskData.type === 'trim') {
+      // สำหรับงานตัดต่อวิดีโอ
+      console.log(`🎬 Processing video trim: ${taskData.startTime} - ${taskData.endTime}`);
+      
+      ffmpegProcess = ffmpegCommand
+        .seekInput(taskData.startTime)           // เริ่มจากเวลาที่กำหนด
+        .duration(calculateDuration(taskData.startTime, taskData.endTime)) // ระยะเวลาที่ต้องการ
+        .size(videoSize)
+        .videoCodec('libx264')
+        .audioCodec('aac')
+        .outputOptions([
+          '-preset', 'fast',
+          '-crf', '23',
+          '-threads', '2',
+          '-movflags', '+faststart',
+          '-maxrate', '3M',
+          '-bufsize', '6M'
+        ]);
+    } else {
+      // สำหรับงานแปลงปกติ (convert)
+      ffmpegProcess = ffmpegCommand
+        .size(videoSize)
+        .videoCodec('libx264')
+        .outputOptions([
+          '-preset', 'fast',        // เปลี่ยนจาก medium เป็น fast เพื่อความเร็ว
+          '-crf', '23',             // ปรับจาก 24 เป็น 23 (คุณภาพดีขึ้นเล็กน้อย)
+          '-threads', '2',          // ใช้ 2 threads ต่องาน (2 งาน = 4 threads รวม)
+          '-movflags', '+faststart',// optimized for streaming
+          '-maxrate', '3M',         // เพิ่ม bitrate จาก 2M เป็น 3M
+          '-bufsize', '6M',         // เพิ่ม buffer จาก 4M เป็น 6M
+          ...(filterComplexArray.length > 0 ? ['-filter_complex', filterComplexArray.join(';')] : []),
+          ...(taskData.imageOverlay ? ['-map', '[final]'] : taskData.textOverlay ? ['-map', '[text_overlay]'] : [])
+        ]);
+    }
+    
+    ffmpegProcess
       .on('start', (commandLine) => {
         console.log('Spawned FFmpeg with command: ' + commandLine);
         // ตั้งค่า nice priority ให้สูงขึ้น (ลด nice value)
