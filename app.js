@@ -300,7 +300,7 @@ app.post('/stream', async (req, res) => {
 
     // อัปเดตข้อมูลในคอลเลกชัน storage
     if (taskData.storage) {
-      await safeUpdateTranscode(taskData.storage, 'stream', 'queue...', true);
+      await safeUpdateTranscode(taskData.storage, 'stream', 'queue...', false);
     }
 
     console.log('Process Cloudflare Stream queue started for task:', taskId);
@@ -1839,7 +1839,7 @@ app.post('/stream-upload', upload.none(), async (req, res) => {
     // อัปเดตข้อมูลในคอลเลกชัน storage ถ้ามี storage ID
     if (storage) {
       try {
-        await safeUpdateTranscode(storage, 'stream', 'queued for Cloudflare Stream...', true);
+        await safeUpdateTranscode(storage, 'stream', 'queued for Cloudflare Stream...', false);
         console.log(`Updated storage ${storage} with stream status`);
       } catch (storageError) {
         console.warn(`Failed to update storage ${storage}:`, storageError.message);
@@ -1924,7 +1924,7 @@ app.post('/webhook/cloudflare-stream', async (req, res) => {
       // Update storage with final stream URL
       if (task.storage) {
         const streamUrl = `https://customer-${uid}.cloudflarestream.com/${uid}/watch`;
-        await safeUpdateTranscode(task.storage, 'stream', streamUrl, true);
+        await safeUpdateTranscode(task.storage, 'stream', streamUID, false);
       }
       
       console.log(`✅ Cloudflare Stream task ${task.taskId} completed via webhook`);
@@ -1944,7 +1944,7 @@ app.post('/webhook/cloudflare-stream', async (req, res) => {
       
       // Update storage with error status
       if (task.storage) {
-        await safeUpdateTranscode(task.storage, 'stream', 'error', true);
+        await safeUpdateTranscode(task.storage, 'stream', 'error', false);
       }
       
       console.log(`❌ Cloudflare Stream task ${task.taskId} failed via webhook: ${status?.errorReasonText}`);
@@ -2130,8 +2130,8 @@ async function processCloudflareStreamQueue(taskId, taskData) {
 
       // Update storage with stream:uid tag immediately
       if (taskData.storage) {
-        await safeUpdateTranscode(taskData.storage, 'stream', `stream:${streamUID}`, true);
-        console.log(`Updated storage ${taskData.storage} with stream:${streamUID}`);
+        await safeUpdateTranscode(taskData.storage, 'stream', streamUID, false);
+        console.log(`Updated storage ${taskData.storage} with stream UID: ${streamUID}`);
       }
 
       console.log(`Stream ID: ${streamUID}`);
@@ -2159,7 +2159,7 @@ async function processCloudflareStreamQueue(taskId, taskData) {
     // Update storage with error status if storage ID provided
     if (taskData.storage) {
       try {
-        await safeUpdateTranscode(taskData.storage, 'stream', 'error', true);
+        await safeUpdateTranscode(taskData.storage, 'stream', 'error', false);
         console.log(`Updated storage ${taskData.storage} with error status`);
       } catch (storageError) {
         console.error(`Failed to update storage ${taskData.storage} with error:`, storageError.message);
@@ -2242,10 +2242,10 @@ async function pollVideoStatus(taskId, streamUID, taskData) {
             }
           });
 
-          // Update storage with final stream URL
+          // Update storage with final stream UID only
           if (taskData.storage) {
-            await safeUpdateTranscode(taskData.storage, 'stream', streamUrl, true);
-            console.log(`Updated storage ${taskData.storage} with final stream URL: ${streamUrl}`);
+            await safeUpdateTranscode(taskData.storage, 'stream', streamUID, false);
+            console.log(`Updated storage ${taskData.storage} with final stream UID: ${streamUID}`);
           }
 
           console.log(`✅ Stream is ready: ${streamUID}`);
@@ -2259,9 +2259,9 @@ async function pollVideoStatus(taskId, streamUID, taskData) {
           throw new Error(`Cloudflare Stream processing failed: ${videoData.status?.errorReasonText || 'Unknown error'}`);
         }
 
-        // Update storage with current status
+        // Update storage with current status (optional - could be removed if not needed)
         if (taskData.storage && pollingAttempts % 5 === 0) { // Update every 5 polls (50 seconds)
-          await safeUpdateTranscode(taskData.storage, 'stream', `stream:${streamUID}:${status}`, true);
+          await safeUpdateTranscode(taskData.storage, 'stream', `processing:${status}`, false);
         }
 
       } else {
@@ -2300,7 +2300,7 @@ async function pollVideoStatus(taskId, streamUID, taskData) {
     });
     
     if (taskData.storage) {
-      await safeUpdateTranscode(taskData.storage, 'stream', 'error:timeout', true);
+      await safeUpdateTranscode(taskData.storage, 'stream', 'error:timeout', false);
     }
     
     throw new Error(`Stream processing timeout after ${pollingAttempts} attempts`);
