@@ -73,7 +73,24 @@ const taskSchema = new mongoose.Schema({
   // เพิ่มฟิลด์สำหรับ text และ image overlay
   textOverlay: Object,  // ข้อมูล text overlay
   imageOverlay: Object, // ข้อมูล image overlay
-  error: String        // ข้อผิดพลาด (ถ้ามี)
+  error: String,       // ข้อผิดพลาด (ถ้ามี)
+  // เพิ่มฟิลด์สำหรับ advanced trim features
+  trimData: {
+    mode: String,           // 'single' หรือ 'multi'
+    segments: [Object],     // array ของ segments สำหรับ multi-trim
+    overlays: [Object],     // array ของ overlays (text/image)
+    videoMetadata: Object,  // metadata ของวิดีโอ
+    audioVolume: Number,    // ระดับเสียง
+    outputFormat: String,   // รูปแบบไฟล์ output
+    processingMode: String, // โหมดการประมวลผล
+    filename: String,       // ชื่อไฟล์ output
+    copyStreams: Boolean,   // copy streams หรือ re-encode
+    audioFilter: String,    // audio filter
+    preserveQuality: Boolean, // รักษาคุณภาพ
+    hardwareAcceleration: Boolean, // ใช้ hardware acceleration
+    threads: String         // จำนวน threads
+  },
+  clientInfo: Object      // ข้อมูล client
 });
 
 const Task = mongoose.model('Queue', taskSchema);
@@ -165,6 +182,54 @@ function calculateDuration(startTime, endTime) {
   
   console.log(`📐 Duration calculation: ${startTime} (${startSeconds}s) - ${endTime} (${endSeconds}s) = ${duration}s`);
   return duration;
+}
+
+// ฟังก์ชันสร้าง text overlay filter
+function createTextOverlayFilter(overlay, videoSize, inputLabel, outputLabel) {
+  const selectedFont = selectThaiFont();
+  const fontPath = selectedFont.path;
+  
+  // คำนวณตำแหน่งจาก percentage
+  const videoWidth = parseInt(videoSize.split('x')[0]);
+  const videoHeight = parseInt(videoSize.split('x')[1]);
+  
+  const x = Math.round((overlay.position.x / 100) * videoWidth);
+  const y = Math.round((overlay.position.y / 100) * videoHeight);
+  
+  // เข้ารหัสข้อความ
+  const cleanText = overlay.content
+    .replace(/'/g, "'")
+    .replace(/"/g, '"')
+    .replace(/\\/g, '\\\\')
+    .replace(/:/g, '\\:')
+    .replace(/\n/g, '\\n');
+  
+  const encodedText = Buffer.from(cleanText, 'utf8').toString('utf8');
+  
+  // สร้าง filter
+  const textFilter = `${inputLabel}drawtext=text='${encodedText}':fontsize=${overlay.style.font_size || 24}:fontcolor=${overlay.style.color || 'white'}:x=${x}:y=${y}:fontfile='${fontPath}':enable='between(t,${overlay.start_time || 0},${overlay.end_time || 999999})':shadowcolor=black@0.8:shadowx=2:shadowy=2:borderw=2:bordercolor=black@0.7${outputLabel}`;
+  
+  console.log(`📝 Text overlay: "${encodedText}" at (${x}, ${y})`);
+  return textFilter;
+}
+
+// ฟังก์ชันสร้าง image overlay filter
+function createImageOverlayFilter(overlay, videoSize, inputLabel, outputLabel, inputIndex) {
+  // คำนวณตำแหน่งและขนาดจาก percentage
+  const videoWidth = parseInt(videoSize.split('x')[0]);
+  const videoHeight = parseInt(videoSize.split('x')[1]);
+  
+  const x = Math.round((overlay.position.x / 100) * videoWidth);
+  const y = Math.round((overlay.position.y / 100) * videoHeight);
+  const width = Math.round((overlay.position.width / 100) * videoWidth);
+  const height = Math.round((overlay.position.height / 100) * videoHeight);
+  
+  // สร้าง filter สำหรับ scale และ overlay
+  const scaleFilter = `[${inputIndex}:v]scale=${width}:${height}:force_original_aspect_ratio=decrease,format=rgba,colorchannelmixer=aa=${overlay.style.opacity || 1.0}[scaled_img_${inputIndex}]`;
+  const overlayFilter = `${inputLabel}[scaled_img_${inputIndex}]overlay=${x}:${y}:enable='between(t,${overlay.start_time || 0},${overlay.end_time || 999999})'${outputLabel}`;
+  
+  console.log(`🖼️ Image overlay: ${overlay.content} at (${x}, ${y}) size ${width}x${height}`);
+  return [scaleFilter, overlayFilter];
 }
 
 let ffmpegProcesses = {}; // เก็บข้อมูลเกี่ยวกับกระบวนการ ffmpeg
@@ -580,53 +645,113 @@ app.delete('/cleanup-old-tasks', async (req, res) => {
   }
 });
 
-// Endpoint สำหรับตัดต่อวิดีโอ (Video Trimming)
+// Endpoint สำหรับตัดต่อวิดีโอ (Video Trimming) - รองรับ Advanced Features
 app.post('/trim', upload.single('video'), async (req, res) => {
   const taskId = uuidv4();
   
   try {
-    if (!req.file) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'No video file provided' 
-      });
-    }
-
-    // รับพารามิเตอร์การตัดต่อ
-    const { startTime, endTime, quality = '720p' } = req.body;
+    // รองรับทั้งการส่งไฟล์และ JSON payload
+    let videoData = {};
     
-    if (!startTime || !endTime) {
+    if (req.body.input_url) {
+      // รับข้อมูลจาก JSON payload (Advanced mode)
+      videoData = {
+        input_url: req.body.input_url,
+        trim_mode: req.body.trim_mode || 'single',
+        segments: req.body.segments || [],
+        overlays: req.body.overlays || [],
+        video_metadata: req.body.video_metadata || {},
+        audio_volume: req.body.audio_volume || 1,
+        output_format: req.body.output_format || 'mp4',
+        quality: req.body.quality || '720p',
+        processing_mode: req.body.processing_mode || 'fast',
+        filename: req.body.filename || `${taskId}-trimmed.mp4`,
+        site: req.body.site || '',
+        storage: req.body.storage || '',
+        client_info: req.body.client_info || {}
+      };
+      
+      console.log(`🎬 Advanced trim request: ${videoData.trim_mode} mode with ${videoData.segments.length} segments`);
+      
+    } else if (req.file) {
+      // โหมดพื้นฐาน (Basic mode) - ใช้ไฟล์ที่อัปโหลด
+      const { startTime, endTime, quality = '720p' } = req.body;
+      
+      if (!startTime || !endTime) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Start time and end time are required (format: HH:MM:SS or seconds)' 
+        });
+      }
+
+      // ตรวจสอบรูปแบบเวลา
+      const timeRegex = /^(\d{1,2}:)?(\d{1,2}:)?\d{1,2}(\.\d+)?$/;
+      if (!timeRegex.test(startTime) || !timeRegex.test(endTime)) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Invalid time format. Use HH:MM:SS or seconds' 
+        });
+      }
+      
+      videoData = {
+        inputPath: req.file.path,
+        originalFilename: req.file.originalname,
+        startTime,
+        endTime,
+        quality,
+        trim_mode: 'single'
+      };
+      
+    } else {
       return res.status(400).json({ 
         success: false, 
-        error: 'Start time and end time are required (format: HH:MM:SS or seconds)' 
+        error: 'No video file or input_url provided' 
       });
     }
 
-    // ตรวจสอบรูปแบบเวลา
-    const timeRegex = /^(\d{1,2}:)?(\d{1,2}:)?\d{1,2}(\.\d+)?$/;
-    if (!timeRegex.test(startTime) || !timeRegex.test(endTime)) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Invalid time format. Use HH:MM:SS or seconds' 
-      });
-    }
-
-    // สร้าง task ใหม่
+    // สร้าง task ใหม่ด้วยข้อมูลครบถ้วน
     const newTask = new Task({
       taskId,
-      originalFilename: req.file.originalname,
-      inputPath: req.file.path,
-      quality,
-      startTime,
-      endTime,
-      type: 'trim', // เพิ่มประเภทงาน
+      originalFilename: videoData.originalFilename || videoData.filename || 'video.mp4',
+      inputPath: videoData.inputPath,
+      url: videoData.input_url,
+      quality: videoData.quality,
+      startTime: videoData.startTime,
+      endTime: videoData.endTime,
+      type: 'trim',
       status: 'queued',
       percent: 0,
-      createdAt: new Date()
+      createdAt: new Date(),
+      // เพิ่มข้อมูลสำหรับ advanced trim
+      trimData: {
+        mode: videoData.trim_mode,
+        segments: videoData.segments,
+        overlays: videoData.overlays,
+        videoMetadata: videoData.video_metadata,
+        audioVolume: videoData.audio_volume,
+        outputFormat: videoData.output_format,
+        processingMode: videoData.processing_mode,
+        filename: videoData.filename,
+        copyStreams: videoData.copy_streams,
+        audioFilter: videoData.audio_filter,
+        preserveQuality: videoData.preserve_quality,
+        hardwareAcceleration: videoData.hardware_acceleration,
+        threads: videoData.threads
+      },
+      site: { spaceId: videoData.storage },
+      storage: videoData.storage,
+      clientInfo: videoData.client_info
     });
 
     await newTask.save();
-    console.log(`✂️ Video trim task created: ${taskId} (${startTime} - ${endTime})`);
+    
+    if (videoData.trim_mode === 'multi') {
+      console.log(`✂️ Multi-segment trim task created: ${taskId}`);
+      console.log(`📊 Segments: ${videoData.segments.length}`);
+      console.log(`🎨 Overlays: ${videoData.overlays.length}`);
+    } else {
+      console.log(`✂️ Single trim task created: ${taskId} (${videoData.startTime} - ${videoData.endTime})`);
+    }
 
     // เริ่มประมวลผลคิว
     processNextQueue();
@@ -634,10 +759,12 @@ app.post('/trim', upload.single('video'), async (req, res) => {
     res.json({ 
       success: true, 
       taskId, 
-      message: 'Video trim task queued successfully',
-      startTime,
-      endTime,
-      quality
+      message: `Video ${videoData.trim_mode} trim task queued successfully`,
+      trimMode: videoData.trim_mode,
+      segments: videoData.segments?.length || 1,
+      overlays: videoData.overlays?.length || 0,
+      quality: videoData.quality,
+      processingMode: videoData.processing_mode
     });
 
   } catch (error) {
@@ -1153,23 +1280,84 @@ async function processQueue(taskId, taskData) {
     let ffmpegProcess;
     
     if (taskData.type === 'trim') {
-      // สำหรับงานตัดต่อวิดีโอ
-      console.log(`🎬 Processing video trim: ${taskData.startTime} - ${taskData.endTime}`);
+      // สำหรับงานตัดต่อวิดีโอ - รองรับทั้ง single และ multi-segment
+      const trimData = taskData.trimData || {};
+      const trimMode = trimData.mode || 'single';
       
-      ffmpegProcess = ffmpegCommand
-        .seekInput(taskData.startTime)           // เริ่มจากเวลาที่กำหนด
-        .duration(calculateDuration(taskData.startTime, taskData.endTime)) // ระยะเวลาที่ต้องการ
-        .size(videoSize)
-        .videoCodec('libx264')
-        .audioCodec('aac')
-        .outputOptions([
-          '-preset', 'fast',
-          '-crf', '23',
-          '-threads', '2',
-          '-movflags', '+faststart',
-          '-maxrate', '3M',
-          '-bufsize', '6M'
-        ]);
+      if (trimMode === 'multi' && trimData.segments && trimData.segments.length > 0) {
+        // Multi-segment trim - รวมหลายช่วงเป็นวิดีโอเดียว
+        console.log(`🎬 Processing multi-segment trim: ${trimData.segments.length} segments`);
+        
+        // สร้าง filter complex สำหรับ multi-segment
+        let segmentFilters = [];
+        let overlayFilters = [];
+        
+        // สร้าง filter สำหรับแต่ละ segment
+        trimData.segments.forEach((segment, index) => {
+          const segmentFilter = `[0:v]trim=start=${segment.start}:end=${segment.end},setpts=PTS-STARTPTS[v${index}]; [0:a]atrim=start=${segment.start}:end=${segment.end},asetpts=PTS-STARTPTS[a${index}]`;
+          segmentFilters.push(segmentFilter);
+        });
+        
+        // รวม segments เข้าด้วยกัน
+        const videoInputs = trimData.segments.map((_, index) => `[v${index}]`).join('');
+        const audioInputs = trimData.segments.map((_, index) => `[a${index}]`).join('');
+        const concatFilter = `${videoInputs}concat=n=${trimData.segments.length}:v=1:a=0[trimmed_video]; ${audioInputs}concat=n=${trimData.segments.length}:v=0:a=1[trimmed_audio]`;
+        
+        // เพิ่ม overlays ถ้ามี
+        let finalVideoOutput = '[trimmed_video]';
+        if (trimData.overlays && trimData.overlays.length > 0) {
+          trimData.overlays.forEach((overlay, index) => {
+            if (overlay.type === 'text') {
+              const textFilter = createTextOverlayFilter(overlay, videoSize, finalVideoOutput, `[text_${index}]`);
+              overlayFilters.push(textFilter);
+              finalVideoOutput = `[text_${index}]`;
+            } else if (overlay.type === 'image') {
+              // สำหรับ image overlay ต้องเพิ่ม input
+              ffmpegCommand = ffmpegCommand.input(overlay.content);
+              const imageFilter = createImageOverlayFilter(overlay, videoSize, finalVideoOutput, `[img_${index}]`, index + 1);
+              overlayFilters.push(imageFilter);
+              finalVideoOutput = `[img_${index}]`;
+            }
+          });
+        }
+        
+        // รวม filters ทั้งหมด
+        const allFilters = [...segmentFilters, concatFilter, ...overlayFilters];
+        
+        ffmpegProcess = ffmpegCommand
+          .complexFilter(allFilters)
+          .map(finalVideoOutput) // video output
+          .map('[trimmed_audio]')  // audio output
+          .videoCodec('libx264')
+          .audioCodec('aac')
+          .outputOptions([
+            '-preset', trimData.processingMode === 'fast' ? 'fast' : 'medium',
+            '-crf', '23',
+            '-threads', trimData.threads === 'auto' ? '0' : '2',
+            '-movflags', '+faststart',
+            '-maxrate', '3M',
+            '-bufsize', '6M'
+          ]);
+          
+      } else {
+        // Single segment trim (โหมดปกติ)
+        console.log(`🎬 Processing single trim: ${taskData.startTime} - ${taskData.endTime}`);
+        
+        ffmpegProcess = ffmpegCommand
+          .seekInput(taskData.startTime)
+          .duration(calculateDuration(taskData.startTime, taskData.endTime))
+          .size(videoSize)
+          .videoCodec('libx264')
+          .audioCodec('aac')
+          .outputOptions([
+            '-preset', 'fast',
+            '-crf', '23',
+            '-threads', '2',
+            '-movflags', '+faststart',
+            '-maxrate', '3M',
+            '-bufsize', '6M'
+          ]);
+      }
     } else {
       // สำหรับงานแปลงปกติ (convert)
       ffmpegProcess = ffmpegCommand
