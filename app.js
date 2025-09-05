@@ -1709,8 +1709,9 @@ app.post('/trim', async (req, res) => {
 // Endpoint: Upload video to Cloudflare Stream
 app.post('/stream-upload', async (req, res) => {
   console.log('Received Cloudflare Stream upload request');
-  const { url, title, description } = req.body;
-  const site = req.body.site;
+  console.log('Request body:', req.body);
+  
+  const { url, title, description, site, storage } = req.body;
   let taskId;
 
   // Validate required fields
@@ -1722,13 +1723,22 @@ app.post('/stream-upload', async (req, res) => {
     return res.status(400).json({ success: false, error: 'Site is required' });
   }
 
+  // Validate URL format
+  try {
+    new URL(url);
+  } catch (urlError) {
+    return res.status(400).json({ success: false, error: 'Invalid URL format' });
+  }
+
   // Check if Account ID is configured
-  if (!CLOUDFLARE_ACCOUNT_ID) {
+  if (!CLOUDFLARE_ACCOUNT_ID || CLOUDFLARE_ACCOUNT_ID === 'YOUR_ACCOUNT_ID') {
     return res.status(500).json({ 
       success: false, 
       error: 'Cloudflare Account ID not configured. Please contact administrator.' 
     });
   }
+
+  console.log(`Processing request: URL=${url}, Site=${site}, Storage=${storage || 'none'}`);
 
   // ตรวจสอบคิวที่รอ
   const queuedCount = await Task.countDocuments({ status: 'queued' });
@@ -1763,10 +1773,11 @@ app.post('/stream-upload', async (req, res) => {
   }
 
   try {
-    // Check for existing task
+    // Check for existing task with same URL and storage
     const existingTask = await Task.findOne({ 
       url: url, 
-      type: 'stream'
+      type: 'stream',
+      storage: storage || { $exists: false }
     });
     
     if (existingTask) {
@@ -1775,11 +1786,25 @@ app.post('/stream-upload', async (req, res) => {
         success: true, 
         taskId: existingTask.taskId,
         cloudflareStreamId: existingTask.cloudflareStreamId,
-        playbackUrl: existingTask.cloudflarePlaybackUrl
+        playbackUrl: existingTask.cloudflarePlaybackUrl,
+        status: existingTask.status,
+        message: 'Task already exists'
       });
     }
 
     taskId = uuidv4();
+
+    // Extract filename from URL for better naming
+    let videoTitle = title;
+    if (!videoTitle) {
+      try {
+        const urlPath = new URL(url).pathname;
+        const filename = urlPath.split('/').pop();
+        videoTitle = filename ? filename.replace(/\.[^/.]+$/, '') : `Video_${taskId.slice(0, 8)}`;
+      } catch {
+        videoTitle = `Video_${taskId.slice(0, 8)}`;
+      }
+    }
 
     // Construct task data for Cloudflare Stream
     const taskData = {
@@ -1790,18 +1815,36 @@ app.post('/stream-upload', async (req, res) => {
       url: url,
       site: hostnameData,
       space: spaceData,
-      storage: req.body.storage,
+      storage: storage || null, // Store storage ID if provided
       retryCount: 0,
       // Cloudflare Stream specific data
       cloudflareStreamMeta: {
-        title: title || 'Untitled Video',
-        description: description || '',
-        originalUrl: url
+        title: videoTitle,
+        description: description || `Uploaded from ${site}`,
+        originalUrl: url,
+        uploadSource: 'ffmprg-system',
+        storageReference: storage || null
       }
     };
 
-    console.log('Cloudflare Stream task data created:', { taskId, inputUrl: url });
+    console.log('Cloudflare Stream task data created:', { 
+      taskId, 
+      inputUrl: url, 
+      title: videoTitle,
+      storage: storage || 'none',
+      site: site
+    });
     await Task.create(taskData);
+
+    // อัปเดตข้อมูลในคอลเลกชัน storage ถ้ามี storage ID
+    if (storage) {
+      try {
+        await safeUpdateTranscode(storage, 'stream', 'queued for Cloudflare Stream...', true);
+        console.log(`Updated storage ${storage} with stream status`);
+      } catch (storageError) {
+        console.warn(`Failed to update storage ${storage}:`, storageError.message);
+      }
+    }
 
     console.log('Process Cloudflare Stream queue started for task:', taskId);
     // เริ่มประมวลผลทันทีหากมีช่องว่าง
@@ -1813,10 +1856,16 @@ app.post('/stream-upload', async (req, res) => {
       success: true, 
       taskId, 
       type: 'stream',
+      url: url,
+      title: videoTitle,
       site: hostnameData,
       space: spaceData,
+      storage: storage || null,
       queuePosition: queuedCount + 1,
-      message: 'Video upload to Cloudflare Stream has been queued'
+      estimatedWaitTime: `${Math.ceil(queuedCount * 2)} minutes`,
+      message: 'Video upload to Cloudflare Stream has been queued',
+      statusCheckUrl: `${baseUrl}/status/${taskId}`,
+      dashboardUrl: `${baseUrl}`
     });
 
   } catch (error) {
@@ -1963,12 +2012,24 @@ async function processCloudflareStreamQueue(taskId, taskData) {
         cloudflareStreamMeta: {
           ...taskData.cloudflareStreamMeta,
           cloudflareData: streamData
-        }
+        },
+        completedAt: Date.now()
       });
 
       console.log(`Cloudflare Stream upload completed for task: ${taskId}`);
       console.log(`Stream ID: ${streamData.uid}`);
       console.log(`Playback URL: https://customer-${streamData.uid}.cloudflarestream.com/${streamData.uid}/manifest/video.m3u8`);
+
+      // Update storage with stream URL if storage ID provided
+      if (taskData.storage) {
+        try {
+          const playbackUrl = `https://customer-${streamData.uid}.cloudflarestream.com/${streamData.uid}/manifest/video.m3u8`;
+          await safeUpdateTranscode(taskData.storage, 'stream', playbackUrl, true);
+          console.log(`Updated storage ${taskData.storage} with playback URL: ${playbackUrl}`);
+        } catch (storageError) {
+          console.error(`Failed to update storage ${taskData.storage}:`, storageError.message);
+        }
+      }
 
       // Clean up temp file
       await cleanupTempFiles(tempFilePath, null);
@@ -1982,8 +2043,19 @@ async function processCloudflareStreamQueue(taskId, taskData) {
     await Task.updateOne({ taskId }, { 
       status: 'error', 
       error: error.message,
-      cloudflareStreamStatus: 'error'
+      cloudflareStreamStatus: 'error',
+      errorAt: Date.now()
     });
+    
+    // Update storage with error status if storage ID provided
+    if (taskData.storage) {
+      try {
+        await safeUpdateTranscode(taskData.storage, 'stream', 'error', true);
+        console.log(`Updated storage ${taskData.storage} with error status`);
+      } catch (storageError) {
+        console.error(`Failed to update storage ${taskData.storage} with error:`, storageError.message);
+      }
+    }
     
     // Clean up temp file
     await cleanupTempFiles(tempFilePath, null);
