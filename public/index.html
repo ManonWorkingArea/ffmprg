@@ -519,7 +519,7 @@
                     }
 
                     // Set loading state
-                    this.$set(this.deletingTasks, taskId, true);
+                    this.deletingTasks[taskId] = true;
                     
                     try {
                         const response = await fetch(`/task/${taskId}`, { 
@@ -551,7 +551,7 @@
                         setTimeout(() => this.showNotification = false, 5000);
                     } finally {
                         // Clear loading state
-                        this.$delete(this.deletingTasks, taskId);
+                        delete this.deletingTasks[taskId];
                     }
                 },
 
