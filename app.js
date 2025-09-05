@@ -55,7 +55,6 @@ mongoose.connect('mongodb+srv://vue:Qazwsx1234!!@cloudmongodb.wpc62e9.mongodb.ne
 // สร้าง Schema และ Model สำหรับคิว
 const taskSchema = new mongoose.Schema({
   taskId: String,
-  type: { type: String, default: 'convert' }, // Type of task: 'convert' or 'trim'
   status: String,
   quality: String,
   createdAt: Date,
@@ -91,11 +90,49 @@ const storageSchema = new mongoose.Schema({
 // สร้างโมเดล Storage
 const Storage = mongoose.model('storage', storageSchema, 'storage'); // Specify collection name as 'hostname'
 
+// ฟังก์ชันตรวจสอบและเลือกฟอนต์ไทยที่ดีที่สุด
+function selectThaiFont() {
+  const thaiFonts = [
+    {
+      path: '/usr/share/fonts/truetype/tlwg/Garuda.ttf',
+      name: 'Garuda',
+      description: 'ฟอนต์ไทยยอดนิยม อ่านง่าย'
+    },
+    {
+      path: '/usr/share/fonts/truetype/tlwg/Waree.ttf',
+      name: 'Waree', 
+      description: 'ฟอนต์ไทยสวย เหมาะกับหัวข้อ'
+    },
+    {
+      path: '/usr/share/fonts/truetype/tlwg/TlwgTypist.ttf',
+      name: 'Tlwg Typist',
+      description: 'ฟอนต์ไทยแบบพิมพ์ดีด'
+    },
+    {
+      path: '/usr/share/fonts/truetype/tlwg/Kinnari-Italic.ttf',
+      name: 'Kinnari',
+      description: 'ฟอนต์ไทยแบบหนังสือ'
+    }
+  ];
+  
+  for (const font of thaiFonts) {
+    if (fs.existsSync(font.path)) {
+      console.log(`✅ Selected Thai font: ${font.name} (${font.description})`);
+      console.log(`📁 Font path: ${font.path}`);
+      return font;
+    }
+  }
+  
+  // Fallback
+  const fallbackPath = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf';
+  console.log(`⚠️  Using fallback font: ${fallbackPath}`);
+  return { path: fallbackPath, name: 'DejaVu Sans', description: 'Fallback font' };
+}
+
 let ffmpegProcesses = {}; // เก็บข้อมูลเกี่ยวกับกระบวนการ ffmpeg
 let isProcessing = false; // ตัวแปรเพื่อบอกสถานะการประมวลผล
 let concurrentJobs = 0; // ตัวนับงานที่กำลังทำพร้อมกัน
-// Configuration constants
-const MAX_CONCURRENT_JOBS = 2; // Sweet spot: Balance performance & stability // ทำงานทีละงานเพื่อประสิทธิภาพสูงสุด
+const MAX_CONCURRENT_JOBS = 2; // เพิ่มเป็น 2 งานพร้อมกัน (จาก 1)
 const DOWNLOAD_TIMEOUT = 30 * 60 * 1000; // 30 นาที สำหรับดาวน์โหลด
 const FFMPEG_TIMEOUT = 3 * 60 * 60 * 1000; // 3 ชั่วโมง สำหรับไฟล์ใหญ่
 
@@ -279,19 +316,34 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     // Construct task data with hostname reference
     const taskData = {
       taskId,
-      type: 'convert', // Add type to distinguish from trim tasks
       status: 'queued',
       quality,
       createdAt: Date.now(),
       outputFile: null,
       inputPath: req.file ? req.file.path : undefined,
-      inputFileSize: req.file ? req.file.size : null, // เพิ่มขนาดไฟล์ต้นฉบับ
-      outputFileSize: null, // จะอัปเดตหลังจากแปลงเสร็จ
       url: req.body.url,
       site: hostnameData,
       space: spaceData,
       storage: req.body.storage,
-      retryCount: 0 // เพิ่มตัวนับการ retry
+      retryCount: 0, // เพิ่มตัวนับการ retry
+      // Text overlay settings
+      textOverlay: req.body.textOverlay ? {
+        text: req.body.textOverlay.text || '',
+        position: req.body.textOverlay.position || 'bottom-right',
+        color: req.body.textOverlay.color || 'white',
+        size: req.body.textOverlay.size || 'medium',
+        x: req.body.textOverlay.x || null,
+        y: req.body.textOverlay.y || null
+      } : null,
+      // Image overlay settings
+      imageOverlay: req.body.imageOverlay ? {
+        imagePath: req.body.imageOverlay.imagePath || null,
+        position: req.body.imageOverlay.position || 'top-right',
+        size: req.body.imageOverlay.size || '200x200',
+        x: req.body.imageOverlay.x || null,
+        y: req.body.imageOverlay.y || null,
+        opacity: req.body.imageOverlay.opacity || 1.0
+      } : null
     };
 
     console.log('Task data created:', taskData);
@@ -364,19 +416,7 @@ app.get('/status/:taskId', async (req, res) => {
 app.get('/tasks', async (req, res) => {
   try {
     const tasks = await Task.find(); // ดึงข้อมูลทั้งหมดจาก MongoDB
-    
-    // เพิ่มข้อมูลขนาดไฟล์ที่อ่านง่าย
-    const enhancedTasks = tasks.map(task => {
-      const taskObj = task.toObject();
-      return {
-        ...taskObj,
-        inputFileSizeFormatted: formatFileSize(taskObj.inputFileSize),
-        outputFileSizeFormatted: formatFileSize(taskObj.outputFileSize),
-        compressionRatio: getCompressionRatio(taskObj.inputFileSize, taskObj.outputFileSize)
-      };
-    });
-    
-    res.json({ success: true, tasks: enhancedTasks }); // คืนค่าข้อมูลทั้งหมด
+    res.json({ success: true, tasks }); // คืนค่าข้อมูลทั้งหมด
   } catch (error) {
     console.error('Error fetching tasks:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch tasks' });
@@ -416,69 +456,6 @@ app.post('/stop/:taskId', async (req, res) => {
     return res.json({ success: true, message: `Process for task ${taskId} stopped.` });
   } else {
     return res.status(404).json({ success: false, error: 'Task not found or already completed.' });
-  }
-});
-
-// Endpoint: Delete completed task
-app.delete('/task/:taskId', async (req, res) => {
-  const taskId = req.params.taskId;
-  
-  try {
-    const task = await Task.findOne({ taskId });
-    
-    if (!task) {
-      return res.status(404).json({ success: false, error: 'Task not found' });
-    }
-    
-    // Only allow deletion of completed, error, or stopped tasks
-    if (!['completed', 'error', 'stopped'].includes(task.status)) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Can only delete completed, error, or stopped tasks' 
-      });
-    }
-    
-    // Clean up output file if exists
-    if (task.outputFile) {
-      const outputPath = path.join(__dirname, 'outputs', task.outputFile.replace('/', ''));
-      try {
-        if (fs.existsSync(outputPath)) {
-          fs.unlinkSync(outputPath);
-          console.log('Deleted output file:', outputPath);
-        }
-      } catch (fileError) {
-        console.error('Error deleting output file:', fileError);
-      }
-    }
-    
-    // Clean up input file if exists
-    if (task.inputPath) {
-      try {
-        if (fs.existsSync(task.inputPath)) {
-          fs.unlinkSync(task.inputPath);
-          console.log('Deleted input file:', task.inputPath);
-        }
-      } catch (fileError) {
-        console.error('Error deleting input file:', fileError);
-      }
-    }
-    
-    // Delete task from database
-    await Task.deleteOne({ taskId });
-    
-    console.log(`Task ${taskId} deleted successfully`);
-    res.json({ 
-      success: true, 
-      message: `Task ${taskId} deleted successfully` 
-    });
-    
-  } catch (error) {
-    console.error('Error deleting task:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to delete task',
-      details: error.message 
-    });
   }
 });
 
@@ -684,6 +661,14 @@ app.get('/server-info', (req, res) => {
   });
 });
 
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({
+    success: false,
+    error: 'Endpoint not found'
+  });
+});
+
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
   console.log(`Max concurrent jobs: ${MAX_CONCURRENT_JOBS}`);
@@ -802,20 +787,20 @@ async function checkSystemLoad() {
     const cpuUsage = await cpu.usage();
     const memInfo = await mem.info();
     
-    // ปรับเกณฑ์สำหรับ 2 concurrent jobs (optimal balance)
-    // CPU: หยุดเมื่อ > 85% (ลดจาก 90% เพื่อเสถียรภาพดีขึ้น)
-    // Memory: หยุดเมื่อ > 75% (ลดจาก 85% เพื่อ safety margin)
-    const cpuOverload = cpuUsage > 85;
+    // ปรับเกณฑ์ให้ใช้ประโยชน์จาก 4 cores ได้มากขึ้น
+    // CPU: หยุดเมื่อ > 90% (เพิ่มจาก 85% เพื่อใช้ประโยชน์มากขึ้น)
+    // Memory: หยุดเมื่อ > 85% (เพิ่มจาก 80%)
+    const cpuOverload = cpuUsage > 90;
     const memoryUsagePercent = (memInfo.usedMemMb / memInfo.totalMemMb) * 100;
-    const memoryOverload = memoryUsagePercent > 75;
+    const memoryOverload = memoryUsagePercent > 85;
     
     return {
       canProcess: !cpuOverload && !memoryOverload,
       cpuUsage,
       memoryUsage: memoryUsagePercent,
       thresholds: {
-        cpu: 85,    // Optimized for 2 concurrent jobs
-        memory: 75  // Better safety margin
+        cpu: 90,
+        memory: 85
       }
     };
   } catch (error) {
@@ -909,7 +894,155 @@ async function processQueue(taskId, taskData) {
     // เริ่มกระบวนการ ffmpeg พร้อม timeout
     console.log('Starting ffmpeg process for task:', taskId);
     
-    const ffmpegProcess = ffmpeg(inputPath)
+    // สร้าง filter complex สำหรับ text และ image overlay
+    let filterComplexArray = [];
+    let inputIndex = 0;
+    
+    // สร้างส่วน video scale และ text overlay
+    let videoFilter = `[0:v]scale=${videoSize}:force_original_aspect_ratio=decrease,pad=${videoSize}:(ow-iw)/2:(oh-ih)/2,setsar=1[scaled]`;
+    
+    // เพิ่ม text overlay ถ้ามี
+    if (taskData.textOverlay && taskData.textOverlay.text) {
+      const textData = taskData.textOverlay;
+      
+      // กำหนดขนาดฟอนต์ตาม video resolution
+      let fontSize = Math.round(parseInt(videoSize.split('x')[1]) * 0.05); // 5% ของความสูงวิดีโอ
+      switch (textData.size) {
+        case 'small': fontSize = Math.round(fontSize * 0.7); break;
+        case 'medium': fontSize = Math.round(fontSize * 1.0); break;
+        case 'large': fontSize = Math.round(fontSize * 1.4); break;
+      }
+      
+      // กำหนดตำแหน่ง text
+      let textPosition = 'x=10:y=10'; // default: บนซ้าย
+      switch (textData.position) {
+        case 'top-left': textPosition = 'x=10:y=10'; break;
+        case 'top-center': textPosition = 'x=(w-text_w)/2:y=10'; break;
+        case 'top-right': textPosition = 'x=w-text_w-10:y=10'; break;
+        case 'center-left': textPosition = 'x=10:y=(h-text_h)/2'; break;
+        case 'center': textPosition = 'x=(w-text_w)/2:y=(h-text_h)/2'; break;
+        case 'center-right': textPosition = 'x=w-text_w-10:y=(h-text_h)/2'; break;
+        case 'bottom-left': textPosition = 'x=10:y=h-text_h-10'; break;
+        case 'bottom-center': textPosition = 'x=(w-text_w)/2:y=h-text_h-10'; break;
+        case 'bottom-right': textPosition = 'x=w-text_w-10:y=h-text_h-10'; break;
+        default: textPosition = textData.x && textData.y ? `x=${textData.x}:y=${textData.y}` : 'x=10:y=10';
+      }
+      
+      // เลือก Thai font ที่เหมาะสมผ่านฟังก์ชัน selectThaiFont()
+      const selectedFont = selectThaiFont();
+      const fontPath = selectedFont.path;
+      
+      console.log(`Using Thai font: ${fontPath}`);
+      
+      // เข้ารหัส text สำหรับภาษาไทยให้ถูกต้อง - รองรับ Unicode
+      let cleanText = textData.text
+        .replace(/'/g, "'")           // แทนที่ single quote
+        .replace(/"/g, '"')           // แทนที่ double quote
+        .replace(/\\/g, '\\\\')       // escape backslash
+        .replace(/:/g, '\\:')         // escape colon สำหรับ FFmpeg
+        .replace(/\n/g, '\\n');       // แทนที่ newline
+      
+      // ตรวจสอบและแปลงข้อความไทยให้ FFmpeg อ่านได้
+      const encodedText = Buffer.from(cleanText, 'utf8').toString('utf8');
+      
+      // สร้าง text filter พร้อม Thai font support, shadow และการปรับแต่งขั้นสูง
+      const textFilter = `drawtext=text='${encodedText}':fontsize=${fontSize}:fontcolor=${textData.color || 'white'}:${textPosition}:fontfile='${fontPath}':enable='between(t,0,999999)':shadowcolor=black@0.8:shadowx=2:shadowy=2:borderw=2:bordercolor=black@0.7:box=1:boxcolor=black@0.3:boxborderw=5`;
+      
+      console.log(`🎨 Text overlay: "${encodedText}"`);
+      console.log(`📝 Using font: ${selectedFont.name} (${selectedFont.description})`);
+      console.log(`🔧 Text filter: ${textFilter}`);
+      
+      videoFilter += `[scaled]${textFilter}[text_overlay]`;
+    } else {
+      videoFilter += '[text_overlay]';
+    }
+    
+    filterComplexArray.push(videoFilter);
+    
+    // เพิ่ม image overlay ถ้ามี
+    if (taskData.imageOverlay && taskData.imageOverlay.imagePath) {
+      const imageData = taskData.imageOverlay;
+      inputIndex = 1;
+      
+      // กำหนดขนาดของ image overlay ตาม video resolution
+      const videoWidth = parseInt(videoSize.split('x')[0]);
+      const videoHeight = parseInt(videoSize.split('x')[1]);
+      
+      let imageWidth, imageHeight;
+      if (imageData.size.includes('x')) {
+        [imageWidth, imageHeight] = imageData.size.split('x').map(s => parseInt(s));
+      } else {
+        // ถ้าไม่ระบุขนาด ให้ใช้ 15% ของความกว้างวิดีโอ
+        imageWidth = Math.round(videoWidth * 0.15);
+        imageHeight = Math.round(videoHeight * 0.15);
+      }
+      
+      // จำกัดขนาดไม่ให้เกิน 25% ของวิดีโอ
+      const maxWidth = Math.round(videoWidth * 0.25);
+      const maxHeight = Math.round(videoHeight * 0.25);
+      
+      if (imageWidth > maxWidth) imageWidth = maxWidth;
+      if (imageHeight > maxHeight) imageHeight = maxHeight;
+      
+      // กำหนดตำแหน่งของ image overlay
+      let overlayX = 10, overlayY = 10; // default: บนซ้าย
+      
+      switch (imageData.position) {
+        case 'top-left': 
+          overlayX = 10; 
+          overlayY = 10; 
+          break;
+        case 'top-center': 
+          overlayX = `(main_w-overlay_w)/2`; 
+          overlayY = 10; 
+          break;
+        case 'top-right': 
+          overlayX = `main_w-overlay_w-10`; 
+          overlayY = 10; 
+          break;
+        case 'center-left': 
+          overlayX = 10; 
+          overlayY = `(main_h-overlay_h)/2`; 
+          break;
+        case 'center': 
+          overlayX = `(main_w-overlay_w)/2`; 
+          overlayY = `(main_h-overlay_h)/2`; 
+          break;
+        case 'center-right': 
+          overlayX = `main_w-overlay_w-10`; 
+          overlayY = `(main_h-overlay_h)/2`; 
+          break;
+        case 'bottom-left': 
+          overlayX = 10; 
+          overlayY = `main_h-overlay_h-10`; 
+          break;
+        case 'bottom-center': 
+          overlayX = `(main_w-overlay_w)/2`; 
+          overlayY = `main_h-overlay_h-10`; 
+          break;
+        case 'bottom-right': 
+          overlayX = `main_w-overlay_w-10`; 
+          overlayY = `main_h-overlay_h-10`; 
+          break;
+        default: 
+          overlayX = imageData.x || 10; 
+          overlayY = imageData.y || 10;
+      }
+      
+      // สร้าง image filter พร้อมการรักษาสัดส่วน
+      const opacity = imageData.opacity || 1.0;
+      const imageFilter = `[1:v]scale=${imageWidth}:${imageHeight}:force_original_aspect_ratio=decrease,format=rgba,colorchannelmixer=aa=${opacity}[img_scaled];[text_overlay][img_scaled]overlay=${overlayX}:${overlayY}[final]`;
+      filterComplexArray.push(imageFilter);
+    }
+    
+    let ffmpegCommand = ffmpeg(inputPath);
+    
+    // เพิ่ม input สำหรับ image overlay
+    if (taskData.imageOverlay && taskData.imageOverlay.imagePath) {
+      ffmpegCommand = ffmpegCommand.input(taskData.imageOverlay.imagePath);
+    }
+    
+    const ffmpegProcess = ffmpegCommand
       .size(videoSize)
       .videoCodec('libx264')
       .outputOptions([
@@ -918,7 +1051,9 @@ async function processQueue(taskId, taskData) {
         '-threads', '2',          // ใช้ 2 threads ต่องาน (2 งาน = 4 threads รวม)
         '-movflags', '+faststart',// optimized for streaming
         '-maxrate', '3M',         // เพิ่ม bitrate จาก 2M เป็น 3M
-        '-bufsize', '6M'          // เพิ่ม buffer จาก 4M เป็น 6M
+        '-bufsize', '6M',         // เพิ่ม buffer จาก 4M เป็น 6M
+        ...(filterComplexArray.length > 0 ? ['-filter_complex', filterComplexArray.join(';')] : []),
+        ...(taskData.imageOverlay ? ['-map', '[final]'] : taskData.textOverlay ? ['-map', '[text_overlay]'] : [])
       ])
       .on('start', (commandLine) => {
         console.log('Spawned FFmpeg with command: ' + commandLine);
@@ -947,18 +1082,7 @@ async function processQueue(taskId, taskData) {
         try {
           console.log('ffmpeg process completed for task:', taskId);
           delete ffmpegProcesses[taskId];
-          
-          // คำนวณขนาดไฟล์หลังแปลง
-          const outputFileSize = fs.statSync(outputPath).size;
-          console.log(`Output file size: ${(outputFileSize / 1024 / 1024).toFixed(2)} MB`);
-          
-          await Task.updateOne({ 
-            taskId 
-          }, { 
-            status: 'completed', 
-            outputFile: `/${outputFileName}`,
-            outputFileSize: outputFileSize // บันทึกขนาดไฟล์หลังแปลง
-          });
+          await Task.updateOne({ taskId }, { status: 'completed', outputFile: `/${outputFileName}` });
           
           // อัปโหลดไปยัง S3
           const fileContent = fs.readFileSync(outputPath);
@@ -1079,16 +1203,9 @@ async function processNextQueue() {
     );
     
     if (nextTask) {
-      console.log(`Found next task: ${nextTask.taskId} (Type: ${nextTask.type || 'convert'}) (System: CPU ${systemLoad.cpuUsage}%, Memory ${systemLoad.memoryUsage}%)`);
-      
-      // เลือก processing function ตาม task type
-      setTimeout(() => {
-        if (nextTask.type === 'trim') {
-          processTrimQueue(nextTask.taskId, nextTask);
-        } else {
-          processQueue(nextTask.taskId, nextTask);
-        }
-      }, 2000);
+      console.log(`Found next task: ${nextTask.taskId} (System: CPU ${systemLoad.cpuUsage}%, Memory ${systemLoad.memoryUsage}%)`);
+      // เริ่มประมวลผลโดยมี delay เล็กน้อยเพื่อให้ระบบได้พัก
+      setTimeout(() => processQueue(nextTask.taskId, nextTask), 2000);
     } else {
       console.log('No queued tasks found');
     }
@@ -1097,25 +1214,6 @@ async function processNextQueue() {
     // หากเกิดข้อผิดพลาด ลอง process อีกครั้งในอีก 30 วินาที
     setTimeout(processNextQueue, 30000);
   }
-}
-
-// ฟังก์ชันสำหรับแปลงขนาดไฟล์ให้อ่านง่าย
-function formatFileSize(bytes) {
-  if (!bytes || bytes === 0) return 'N/A';
-  
-  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  
-  if (i === 0) return `${bytes} ${sizes[i]}`;
-  return `${(bytes / Math.pow(1024, i)).toFixed(2)} ${sizes[i]}`;
-}
-
-// ฟังก์ชันคำนวณเปอร์เซ็นต์การบีบอัด
-function getCompressionRatio(inputSize, outputSize) {
-  if (!inputSize || !outputSize) return null;
-  
-  const ratio = ((inputSize - outputSize) / inputSize * 100);
-  return ratio > 0 ? ratio.toFixed(1) : 0;
 }
 
 // เพิ่มฟังก์ชันสำหรับ retry งานที่ error
@@ -1137,565 +1235,47 @@ async function retryFailedTasks() {
 // เรียกใช้ retry ทุก 5 นาที
 setInterval(retryFailedTasks, 5 * 60 * 1000);
 
-// Endpoint: Video trimming with overlays
-app.post('/trim', async (req, res) => {
-  console.log('Received trim request');
-  const trimData = req.body;
-  const site = trimData.site || req.body.site;
-  let taskId;
-
-  // Validate required fields
-  if (!trimData.input_url) {
-    return res.status(400).json({ success: false, error: 'input_url is required' });
-  }
-
-  if (!site) {
-    return res.status(400).json({ success: false, error: 'Site is required' });
-  }
-
-  if (!trimData.segments || !Array.isArray(trimData.segments) || trimData.segments.length === 0) {
-    return res.status(400).json({ success: false, error: 'segments array is required' });
-  }
-
-  // ตรวจสอบคิวที่รอ
-  const queuedCount = await Task.countDocuments({ status: 'queued' });
-  const processingCount = await Task.countDocuments({ status: 'processing' });
-  
-  // ตรวจสอบ system load
-  const systemLoad = await checkSystemLoad();
-  
-  if (queuedCount > 50) {
-    return res.status(429).json({ 
-      success: false, 
-      error: 'Queue is full. Please try again later.',
-      queueStatus: { queued: queuedCount, processing: processingCount }
-    });
-  }
-
-  // Fetch hostname data
-  let hostnameData;
-  let spaceData;
+// Endpoint สำหรับตรวจสอบฟอนต์ไทยที่ติดตั้ง
+app.get('/check-thai-fonts', (req, res) => {
   try {
-    hostnameData = await getHostnameData(site);
-    console.log('Fetched hostname data:', hostnameData);
-    if (!hostnameData) {
-      return res.status(404).json({ success: false, error: 'Hostname not found' });
-    }
-
-    spaceData = await getSpaceData(hostnameData.spaceId);
-    console.log('Fetched space data:', spaceData);
-    if (!spaceData) {
-      return res.status(404).json({ success: false, error: 'Space not found' });
-    }
-  } catch (error) {
-    console.error('Failed to fetch hostname/space data:', error);
-    return res.status(500).json({ success: false, error: 'Failed to fetch configuration data' });
-  }
-
-  try {
-    // Check for existing task
-    const existingTask = await Task.findOne({ 
-      url: trimData.input_url, 
-      type: 'trim',
-      'trimData.segments': { $elemMatch: { $in: trimData.segments.map(s => s.id) } }
-    });
+    const selectedFont = selectThaiFont();
     
-    if (existingTask) {
-      console.log('Existing trim task found:', existingTask.taskId);
-      return res.json({ success: true, taskId: existingTask.taskId });
-    }
-
-    taskId = uuidv4();
-
-    // Construct task data with trim information
-    const taskData = {
-      taskId,
-      type: 'trim', // Add type to distinguish from regular convert tasks
-      status: 'queued',
-      quality: trimData.quality || '720p',
-      createdAt: Date.now(),
-      outputFile: null,
-      url: trimData.input_url,
-      trimData: trimData, // Store all trim data
-      site: hostnameData,
-      space: spaceData,
-      storage: trimData.storage,
-      retryCount: 0
-    };
-
-    console.log('Trim task data created:', { taskId, inputUrl: trimData.input_url, segments: trimData.segments.length });
-    await Task.create(taskData);
-
-    // อัปเดตข้อมูลในคอลเลกชัน storage
-    if (taskData.storage) {
-      await Storage.findOneAndUpdate(
-        { _id: new mongoose.Types.ObjectId(taskData.storage) },
-        { $set: { [`transcode.trim_${taskData.quality}`]: 'queue...' } },
-        { new: true }
-      ).exec();
-    }
-
-    console.log('Process trim queue started for task:', taskId);
-    // เริ่มประมวลผลทันทีหากมีช่องว่าง
-    if (concurrentJobs < MAX_CONCURRENT_JOBS) {
-      processTrimQueue(taskId, taskData);
-    }
-
-    res.json({ 
-      success: true, 
-      taskId, 
-      downloadLink: `${baseUrl}/outputs/${taskId}-trimmed.mp4`,
-      site: hostnameData,
-      space: spaceData,
-      queuePosition: queuedCount + 1,
-      segments: trimData.segments.length,
-      totalDuration: trimData.segments.reduce((sum, seg) => sum + seg.duration, 0)
-    });
-
-  } catch (error) {
-    console.error('Error in trim endpoint:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Internal server error',
-      details: error.message 
-    });
-  }
-});
-
-// Processing function for trim tasks
-async function processTrimQueue(taskId, taskData) {
-  // ตรวจสอบ system load ก่อนเริ่มงาน
-  const systemLoad = await checkSystemLoad();
-  if (!systemLoad.canProcess) {
-    console.log(`System overloaded (CPU: ${systemLoad.cpuUsage}%, Memory: ${systemLoad.memoryUsage}%). Trim task ${taskId} delayed.`);
-    setTimeout(() => processTrimQueue(taskId, taskData), 30000);
-    return;
-  }
-
-  // ตรวจสอบจำนวนงานที่กำลังทำพร้อมกัน
-  if (concurrentJobs >= MAX_CONCURRENT_JOBS) {
-    console.log(`Max concurrent jobs reached (${MAX_CONCURRENT_JOBS}). Trim task ${taskId} remains queued.`);
-    return;
-  }
-
-  concurrentJobs++;
-  console.log(`Processing trim queue for task: ${taskId} (Active jobs: ${concurrentJobs}/${MAX_CONCURRENT_JOBS})`);
-  
-  const trimData = taskData.trimData;
-  const outputFileName = trimData.filename || `${taskId}-trimmed.mp4`;
-  const outputPath = path.join(__dirname, 'outputs', outputFileName);
-  const inputPath = path.join('uploads', `${taskId}-input.mp4`);
-  let additionalInputs = []; // For storing overlay image paths
-
-  try {
-    console.log('Downloading video from URL:', trimData.input_url);
-    await Task.updateOne({ taskId }, { status: 'downloading' });
-    
-    if (taskData.storage) {
-      await Storage.findOneAndUpdate(
-        { _id: new mongoose.Types.ObjectId(taskData.storage) },
-        { $set: { [`transcode.trim_${taskData.quality}`]: 'downloading...' } },
-        { new: true }
-      ).exec();
-    }
-
-    try {
-      await downloadWithTimeout(trimData.input_url, inputPath);
-      console.log('Video downloaded to:', inputPath);
-    } catch (downloadError) {
-      console.error('Download failed for trim task:', taskId, downloadError);
-      throw new Error(`Download failed: ${downloadError.message}`);
-    }
-
-    await Task.updateOne({ taskId }, { status: 'processing' });
-    console.log('Trim task status updated to processing for task:', taskId);
-
-    const spaceData = JSON.parse(JSON.stringify(await getSpaceData(taskData.site.spaceId)));
-    taskData.space = spaceData;
-
-    // ตั้งค่า S3
-    const s3Client = new S3({
-      endpoint: `${taskData.space.s3EndpointDefault}`,
-      region: `${taskData.space.s3Region}`,
-      ResponseContentEncoding: "utf-8",
-      credentials: {
-        accessKeyId: taskData.space.s3Key,
-        secretAccessKey: taskData.space.s3Secret
-      },
-      forcePathStyle: false
-    });
-
-    // สร้าง FFmpeg command สำหรับ trimming
-    console.log('Starting FFmpeg trim process for task:', taskId);
-    console.log('Segments to process:', trimData.segments.length);
-    
-    let ffmpegCommand = ffmpeg(inputPath);
-
-    // กำหนด video size ตาม quality
-    let videoSize;
-    switch (trimData.quality) {
-      case '240p': videoSize = '426x240'; break;
-      case '420p': videoSize = '640x360'; break;
-      case '720p': videoSize = '1280x720'; break;
-      case '1080p': videoSize = '1920x1080'; break;
-      case '1920p': videoSize = '1920x1080'; break;
-      default: videoSize = '1280x720';
-    }
-
-    // สร้าง filter complex สำหรับ trim และ overlays
-    let filterComplex = [];
-    let inputs = ['0:v', '0:a'];
-
-    // ถ้ามี segments หลายส่วน ให้ทำการ trim แต่ละส่วนก่อน
-    if (trimData.trim_mode === 'multi' && trimData.segments.length > 1) {
-      // สร้าง trim filters สำหรับแต่ละ segment
-      trimData.segments.forEach((segment, index) => {
-        filterComplex.push(
-          `[0:v]trim=start=${segment.start}:end=${segment.end}:duration=${segment.duration},setpts=PTS-STARTPTS[v${index}]`,
-          `[0:a]atrim=start=${segment.start}:end=${segment.end}:duration=${segment.duration},asetpts=PTS-STARTPTS[a${index}]`
-        );
-      });
-
-      // รวม segments ทั้งหมด
-      const videoInputs = trimData.segments.map((_, i) => `[v${i}]`).join('');
-      const audioInputs = trimData.segments.map((_, i) => `[a${i}]`).join('');
-      
-      filterComplex.push(
-        `${videoInputs}concat=n=${trimData.segments.length}:v=1:a=0[trimmed_video]`,
-        `${audioInputs}concat=n=${trimData.segments.length}:v=0:a=1[trimmed_audio]`
-      );
-
-      inputs = ['[trimmed_video]', '[trimmed_audio]'];
-    } else if (trimData.segments.length === 1) {
-      // Single segment trim
-      const segment = trimData.segments[0];
-      filterComplex.push(
-        `[0:v]trim=start=${segment.start}:end=${segment.end}:duration=${segment.duration},setpts=PTS-STARTPTS[trimmed_video]`,
-        `[0:a]atrim=start=${segment.start}:end=${segment.end}:duration=${segment.duration},asetpts=PTS-STARTPTS[trimmed_audio]`
-      );
-      inputs = ['[trimmed_video]', '[trimmed_audio]'];
-    }
-
-    // เพิ่ม overlays ถ้ามี
-    let finalVideoInput = inputs[0];
-    let additionalInputs = [];
-    let overlayInputIndex = 1; // เริ่มจาก input index 1 (0 คือ video หลัก)
-    
-    if (trimData.overlays && trimData.overlays.length > 0) {
-      console.log(`Processing ${trimData.overlays.length} overlays for task ${taskId}`);
-      
-      // Download image overlays ก่อน
-      for (let i = 0; i < trimData.overlays.length; i++) {
-        const overlay = trimData.overlays[i];
-        if (overlay.type === 'image' && overlay.content) {
-          const imageInputPath = path.join('uploads', `${taskId}-overlay-${i}.png`);
-          try {
-            console.log(`Downloading overlay image ${i}:`, overlay.content);
-            await downloadWithTimeout(overlay.content, imageInputPath, 30000); // 30 second timeout for images
-            additionalInputs.push(imageInputPath);
-            ffmpegCommand = ffmpegCommand.input(imageInputPath);
-            console.log(`Successfully added image input ${overlayInputIndex}:`, imageInputPath);
-            overlayInputIndex++;
-          } catch (imageError) {
-            console.warn(`Failed to download overlay image ${i}:`, imageError.message);
-            // Continue without this overlay
-          }
-        }
-      }
-
-      // Reset overlay input index for filter processing
-      overlayInputIndex = 1;
-      let imageOverlayIndex = 0;
-      
-      // เพิ่ม overlay filters
-      trimData.overlays.forEach((overlay, index) => {
-        console.log(`Processing overlay ${index}:`, overlay.type, overlay.content);
-        console.log(`Overlay position:`, overlay.position);
-        console.log(`Video dimensions:`, trimData.video_metadata?.width, 'x', trimData.video_metadata?.height);
-        
-        if (overlay.type === 'image' && additionalInputs[imageOverlayIndex]) {
-          // สำหรับ image overlay - คำนวณตำแหน่งและขนาดจากเปอร์เซ็นต์
-          const videoWidth = trimData.video_metadata?.width || 1280;
-          const videoHeight = trimData.video_metadata?.height || 720;
-          
-          const x = Math.round((overlay.position?.x || 0) * videoWidth / 100);
-          const y = Math.round((overlay.position?.y || 0) * videoHeight / 100);
-          const width = Math.round((overlay.position?.width || 25) * videoWidth / 100);
-          const height = Math.round((overlay.position?.height || 25) * videoHeight / 100);
-          const opacity = overlay.style?.opacity || 1;
-          
-          console.log(`Image overlay calculated: ${width}x${height} at ${x},${y} with opacity ${opacity}`);
-          console.log(`Image overlay percentages: ${overlay.position?.width}% x ${overlay.position?.height}% at ${overlay.position?.x}%,${overlay.position?.y}%`);
-          
-          // Scale image with opacity
-          filterComplex.push(
-            `[${overlayInputIndex}:v]scale=${width}:${height},format=rgba,colorchannelmixer=aa=${opacity}[overlay_img${index}]`
-          );
-          
-          // Apply overlay with time constraints
-          filterComplex.push(
-            `${finalVideoInput}[overlay_img${index}]overlay=${x}:${y}:enable='between(t,${overlay.start_time},${overlay.end_time})'[overlay${index}]`
-          );
-          
-          finalVideoInput = `[overlay${index}]`;
-          overlayInputIndex++;
-          imageOverlayIndex++;
-        } else if (overlay.type === 'text') {
-          // สำหรับ text overlay - คำนวณตำแหน่งจากเปอร์เซ็นต์
-          const videoWidth = trimData.video_metadata?.width || 1280;
-          const videoHeight = trimData.video_metadata?.height || 720;
-          
-          const fontsize = overlay.style?.font_size || 24;
-          const fontcolor = overlay.style?.color || 'white';
-          
-          // คำนวณตำแหน่งจากเปอร์เซ็นต์
-          let x = Math.round((overlay.position?.x || 10) * videoWidth / 100);
-          let y = Math.round((overlay.position?.y || 10) * videoHeight / 100);
-          
-          const text = overlay.content.replace(/'/g, "\\\\'").replace(/"/g, '\\\\"'); // Escape quotes
-          
-          console.log(`Text overlay calculated: "${text}" at ${x},${y} (${overlay.position?.x}%, ${overlay.position?.y}%), size ${fontsize}`);
-          console.log(`Text overlay style:`, overlay.style);
-          
-          let drawTextFilter = `${finalVideoInput}drawtext=text='${text}':fontsize=${fontsize}:fontcolor=${fontcolor}`;
-          
-          // Handle text alignment - ปรับตำแหน่ง x ตาม text_align
-          if (overlay.style?.text_align === 'center') {
-            drawTextFilter += `:x=(w-text_w)/2`; // ใช้ width ทั้งหมด สำหรับ center
-          } else if (overlay.style?.text_align === 'right') {
-            drawTextFilter += `:x=w-text_w-${x}`; // จากขวา minus margin
-          } else {
-            drawTextFilter += `:x=${x}`; // left align ใช้ตำแหน่งตรงๆ
-          }
-          
-          drawTextFilter += `:y=${y}`;
-          
-          // เพิ่ม text styling options
-          if (overlay.style?.font_weight === 'bold') {
-            // Note: FFmpeg doesn't directly support font-weight, would need different font file
-          }
-          if (overlay.style?.text_shadow) {
-            drawTextFilter += `:shadowcolor=black:shadowx=2:shadowy=2`;
-          }
-          if (overlay.style?.opacity && overlay.style.opacity !== 1) {
-            drawTextFilter += `:alpha=${overlay.style.opacity}`;
-          }
-          
-          drawTextFilter += `:enable='between(t,${overlay.start_time},${overlay.end_time})'`;
-          
-          console.log(`Generated text filter:`, drawTextFilter);
-          
-          filterComplex.push(
-            `${drawTextFilter}[text${index}]`
-          );
-          finalVideoInput = `[text${index}]`;
-        }
-      });
-      
-      console.log(`Generated filter complex (${filterComplex.length} filters):`, filterComplex);
-    }
-
-    // Scale video ถ้าจำเป็น
-    if (videoSize !== `${trimData.video_metadata.width}x${trimData.video_metadata.height}`) {
-      filterComplex.push(`${finalVideoInput}scale=${videoSize}[scaled]`);
-      finalVideoInput = '[scaled]';
-    }
-
-    // Map final outputs
-    let outputOptions = [
-      '-preset', 'fast',
-      '-crf', '23',
-      '-threads', '2',
-      '-movflags', '+faststart',
-      '-maxrate', '3M',
-      '-bufsize', '6M'
+    // ตรวจสอบฟอนต์ TLWG ทั้งหมด
+    const allThaiFonts = [
+      '/usr/share/fonts/truetype/tlwg/Garuda.ttf',
+      '/usr/share/fonts/truetype/tlwg/Waree.ttf', 
+      '/usr/share/fonts/truetype/tlwg/TlwgTypist.ttf',
+      '/usr/share/fonts/truetype/tlwg/Kinnari-Italic.ttf',
+      '/usr/share/fonts/truetype/tlwg/Loma-Oblique.ttf',
+      '/usr/share/fonts/truetype/tlwg/Laksaman-Italic.ttf',
+      '/usr/share/fonts/truetype/tlwg/TlwgTypo-Bold.ttf',
+      '/usr/share/fonts/truetype/tlwg/TlwgMono-Bold.ttf',
+      '/usr/share/fonts/truetype/tlwg/TlwgTypewriter-BoldOblique.ttf'
     ];
-
-    // ตั้งค่า filter complex
-    if (filterComplex.length > 0) {
-      ffmpegCommand = ffmpegCommand.complexFilter(filterComplex);
-      
-      // Map final video and audio outputs
-      if (finalVideoInput.startsWith('[') && finalVideoInput.endsWith(']')) {
-        outputOptions.push('-map', finalVideoInput);
-      } else {
-        outputOptions.push('-map', '0:v');
-      }
-      outputOptions.push('-map', inputs[1] || '0:a');
-    }
-
-    // เพิ่ม options
-    ffmpegCommand = ffmpegCommand
-      .videoCodec('libx264')
-      .audioCodec('aac')
-      .outputOptions(outputOptions);
-
-    // ถ้ามี audio volume adjustment
-    if (trimData.audio_volume && trimData.audio_volume !== 1) {
-      ffmpegCommand = ffmpegCommand.audioFilters(`volume=${trimData.audio_volume}`);
-    }
-
-    // Event handlers
-    ffmpegCommand
-      .on('start', (commandLine) => {
-        console.log('Spawned FFmpeg trim with command: ' + commandLine);
-      })
-      .on('progress', async (progress) => {
-        const percent = Math.round(progress.percent) || 0;
-        console.log(`Trim processing progress for task ${taskId}: ${percent}%`);
-        await Task.updateOne({ taskId }, { status: 'processing', percent });
-
-        if (taskData.storage) {
-          await Storage.findOneAndUpdate(
-            { _id: new mongoose.Types.ObjectId(taskData.storage) },
-            { $set: { [`transcode.trim_${taskData.quality}`]: percent } },
-            { new: true }
-          ).exec();
-        }
-      })
-      .on('end', async () => {
-        try {
-          console.log('FFmpeg trim process completed for task:', taskId);
-          delete ffmpegProcesses[taskId];
-          
-          // คำนวณขนาดไฟล์หลังแปลง
-          const outputFileSize = fs.statSync(outputPath).size;
-          console.log(`Trim output file size: ${(outputFileSize / 1024 / 1024).toFixed(2)} MB`);
-          
-          await Task.updateOne({ 
-            taskId 
-          }, { 
-            status: 'completed', 
-            outputFile: `/${outputFileName}`,
-            outputFileSize: outputFileSize
-          });
-          
-          // อัปโหลดไปยัง S3
-          const fileContent = fs.readFileSync(outputPath);
-          const params = {
-            Bucket: `${taskData.space.s3Bucket}`,
-            Key: `outputs/${outputFileName}`,
-            Body: fileContent,
-            ACL: 'public-read'
-          };
-
-          const uploadResult = await s3Client.putObject(params);
-          const remoteUrl = `${taskData.space.s3Endpoint}outputs/${outputFileName}`;
-
-          if (taskData.storage) {
-            await Storage.findOneAndUpdate(
-              { _id: new mongoose.Types.ObjectId(taskData.storage) },
-              { $set: { [`transcode.trim_${taskData.quality}`]: remoteUrl } },
-              { new: true }
-            ).exec();
-          }
-
-          console.log("Trim storage updated with remote URL:", remoteUrl);
-          
-          // ทำความสะอาดไฟล์ชั่วคราว (รวมถึง overlay images)
-          await cleanupTempFiles(inputPath, outputPath);
-          
-          // ทำความสะอาด overlay image files
-          for (let i = 0; i < additionalInputs.length; i++) {
-            if (additionalInputs[i] && fs.existsSync(additionalInputs[i])) {
-              try {
-                fs.unlinkSync(additionalInputs[i]);
-                console.log('Cleaned up overlay image:', additionalInputs[i]);
-              } catch (cleanupError) {
-                console.error('Error cleaning up overlay image:', cleanupError);
-              }
-            }
-          }
-          
-        } catch (uploadError) {
-          console.error('Error in trim post-processing for task:', taskId, uploadError);
-          await Task.updateOne({ taskId }, { status: 'error', error: uploadError.message });
-        } finally {
-          concurrentJobs--;
-          console.log(`Trim task ${taskId} finished. Active jobs: ${concurrentJobs}/${MAX_CONCURRENT_JOBS}`);
-          processNextQueue();
-        }
-      })
-      .on('error', async (err) => {
-        try {
-          console.error('FFmpeg trim process error for task:', taskId, err);
-          delete ffmpegProcesses[taskId];
-          await Task.updateOne({ taskId }, { status: 'error', error: err.message });
-          
-          if (taskData.storage) {
-            await Storage.findOneAndUpdate(
-              { _id: new mongoose.Types.ObjectId(taskData.storage) },
-              { $set: { [`transcode.trim_${taskData.quality}`]: 'error' } },
-              { new: true }
-            ).exec();
-          }
-          
-          await cleanupTempFiles(inputPath, outputPath);
-          
-          // ทำความสะอาด overlay image files
-          for (let i = 0; i < (additionalInputs?.length || 0); i++) {
-            if (additionalInputs[i] && fs.existsSync(additionalInputs[i])) {
-              try {
-                fs.unlinkSync(additionalInputs[i]);
-                console.log('Cleaned up overlay image on error:', additionalInputs[i]);
-              } catch (cleanupError) {
-                console.error('Error cleaning up overlay image on error:', cleanupError);
-              }
-            }
-          }
-          
-        } catch (cleanupError) {
-          console.error('Error during trim cleanup for task:', taskId, cleanupError);
-        } finally {
-          concurrentJobs--;
-          console.log(`Trim task ${taskId} failed. Active jobs: ${concurrentJobs}/${MAX_CONCURRENT_JOBS}`);
-          processNextQueue();
-        }
-      });
-
-    // เก็บ reference ของ process และเพิ่ม timeout
-    ffmpegProcesses[taskId] = ffmpegCommand;
     
-    // ตั้ง timeout สำหรับ ffmpeg process
-    const timeoutId = setTimeout(async () => {
-      if (ffmpegProcesses[taskId]) {
-        console.log(`FFmpeg trim timeout for task: ${taskId}`);
-        ffmpegProcesses[taskId].kill('SIGTERM');
-        delete ffmpegProcesses[taskId];
-        await Task.updateOne({ taskId }, { status: 'error', error: 'Processing timeout' });
-        await cleanupTempFiles(inputPath, outputPath);
-        concurrentJobs--;
-        processNextQueue();
-      }
-    }, FFMPEG_TIMEOUT);
-
-    // เริ่มการประมวลผล
-    ffmpegCommand.save(outputPath);
-
+    const installedFonts = allThaiFonts.filter(fontPath => fs.existsSync(fontPath));
+    
+    res.json({
+      success: true,
+      selectedFont: {
+        name: selectedFont.name,
+        path: selectedFont.path,
+        description: selectedFont.description,
+        exists: fs.existsSync(selectedFont.path)
+      },
+      installedThaiFonts: installedFonts.map(fontPath => ({
+        path: fontPath,
+        name: path.basename(fontPath, '.ttf'),
+        exists: fs.existsSync(fontPath)
+      })),
+      totalInstalled: installedFonts.length,
+      platform: process.platform
+    });
   } catch (error) {
-    console.error('Error in processTrimQueue for task:', taskId, error);
-    await Task.updateOne({ taskId }, { status: 'error', error: error.message });
-    
-    if (taskData.storage) {
-      await Storage.findOneAndUpdate(
-        { _id: new mongoose.Types.ObjectId(taskData.storage) },
-        { $set: { [`transcode.trim_${taskData.quality}`]: 'error' } },
-        { new: true }
-      ).exec();
-    }
-    
-    await cleanupTempFiles(inputPath, outputPath);
-    concurrentJobs--;
-    console.log(`Trim task ${taskId} error. Active jobs: ${concurrentJobs}/${MAX_CONCURRENT_JOBS}`);
-    processNextQueue();
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
   }
-}
-
-// 404 handler - ต้องอยู่ท้ายสุดเสมอ
-app.use('*', (req, res) => {
-  res.status(404).json({
-    success: false,
-    error: 'Endpoint not found'
-  });
 });
 
