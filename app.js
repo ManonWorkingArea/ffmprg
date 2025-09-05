@@ -407,15 +407,47 @@ app.post('/start/:taskId', async (req, res) => {
 app.post('/stop/:taskId', async (req, res) => {
   const taskId = req.params.taskId;
 
-  if (ffmpegProcesses[taskId]) {
-    ffmpegProcesses[taskId].kill('SIGINT'); // ส่งสัญญาณให้หยุดกระบวนการ
-    delete ffmpegProcesses[taskId]; // ลบกระบวนการจากรายการ
-    await Task.updateOne({ taskId }, { status: 'stopped' }); // อัปเดตสถานะใน MongoDB
-    concurrentJobs--; // ลดตัวนับงาน
-    processNextQueue(); // ลองประมวลผลงานถัดไป
-    return res.json({ success: true, message: `Process for task ${taskId} stopped.` });
-  } else {
-    return res.status(404).json({ success: false, error: 'Task not found or already completed.' });
+  try {
+    // ตรวจสอบว่า task มีอยู่ใน database หรือไม่
+    const task = await Task.findOne({ taskId });
+    
+    if (!task) {
+      return res.status(404).json({ success: false, error: 'Task not found in database.' });
+    }
+
+    // ถ้า task กำลัง running อยู่ ให้หยุดกระบวนการ
+    if (ffmpegProcesses[taskId]) {
+      ffmpegProcesses[taskId].kill('SIGINT'); // ส่งสัญญาณให้หยุดกระบวนการ
+      delete ffmpegProcesses[taskId]; // ลบกระบวนการจากรายการ
+      await Task.updateOne({ taskId }, { status: 'stopped' }); // อัปเดตสถานะใน MongoDB
+      concurrentJobs--; // ลดตัวนับงาน
+      processNextQueue(); // ลองประมวลผลงานถัดไป
+      return res.json({ success: true, message: `Process for task ${taskId} stopped successfully.` });
+    } 
+    // ถ้า task เสร็จแล้วหรือหยุดแล้ว
+    else if (['completed', 'error', 'stopped'].includes(task.status)) {
+      return res.json({ 
+        success: false, 
+        error: `Task is already ${task.status}. Cannot stop a ${task.status} task.`,
+        currentStatus: task.status 
+      });
+    }
+    // ถ้า task อยู่ใน queue รอ
+    else if (task.status === 'queued') {
+      await Task.updateOne({ taskId }, { status: 'stopped' });
+      return res.json({ success: true, message: `Queued task ${taskId} removed from queue.` });
+    }
+    // กรณีอื่นๆ
+    else {
+      return res.json({ 
+        success: false, 
+        error: `Cannot stop task with status: ${task.status}`,
+        currentStatus: task.status 
+      });
+    }
+  } catch (error) {
+    console.error('Error stopping task:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error.' });
   }
 });
 
