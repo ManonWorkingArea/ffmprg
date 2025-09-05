@@ -2423,6 +2423,13 @@ async function processTrimQueue(taskId, taskData) {
   const inputPath = path.join('uploads', `${taskId}-input.mp4`);
   let additionalInputs = []; // For storing overlay image paths
 
+  // สร้าง output directory ถ้ายังไม่มี
+  const outputDir = path.join(__dirname, 'outputs');
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
+    console.log('Created output directory:', outputDir);
+  }
+
   try {
     console.log('Downloading video from URL:', trimData.input_url || trimData.url);
     await Task.updateOne({ taskId }, { status: 'downloading' });
@@ -2474,218 +2481,244 @@ async function processTrimQueue(taskId, taskData) {
       default: videoSize = '1280x720';
     }
 
-    // สร้าง filter complex สำหรับ trim และ overlays
-    let filterComplex = [];
-    let inputs = ['0:v', '0:a'];
+    // ตรวจสอบว่าสามารถใช้ copy mode ได้หรือไม่
+    const hasOverlays = (trimData.overlays && trimData.overlays.length > 0) ||
+                       (trimData.text_overlays && trimData.text_overlays.length > 0) ||
+                       (trimData.image_overlays && trimData.image_overlays.length > 0);
+    
+    const hasAudioProcessing = trimData.audio_volume && trimData.audio_volume !== 1.0 ||
+                              trimData.audio_filter;
 
-    // ถ้ามี segments หลายส่วน ให้ทำการ trim แต่ละส่วนก่อน
-    if (trimData.trim_mode === 'multi' && trimData.segments.length > 1) {
-      // สร้าง trim filters สำหรับแต่ละ segment
-      trimData.segments.forEach((segment, index) => {
-        filterComplex.push(
-          `[0:v]trim=start=${segment.start}:end=${segment.end}:duration=${segment.duration},setpts=PTS-STARTPTS[v${index}]`,
-          `[0:a]atrim=start=${segment.start}:end=${segment.end}:duration=${segment.duration},asetpts=PTS-STARTPTS[a${index}]`
-        );
-      });
+    const hasMultipleSegments = trimData.trim_mode === 'multi' && trimData.segments.length > 1;
+    
+    const canUseCopyMode = trimData.copy_streams && 
+                          !hasOverlays &&
+                          !hasAudioProcessing &&
+                          !hasMultipleSegments;
 
-      // รวม segments ทั้งหมด
-      const videoInputs = trimData.segments.map((_, i) => `[v${i}]`).join('');
-      const audioInputs = trimData.segments.map((_, i) => `[a${i}]`).join('');
+    console.log(`Copy mode analysis: requested=${trimData.copy_streams}, hasOverlays=${hasOverlays}, hasAudioProcessing=${hasAudioProcessing}, hasMultipleSegments=${hasMultipleSegments}, canUse=${canUseCopyMode}`);
+
+    if (canUseCopyMode) {
+      console.log('Using simple copy mode - single segment trim only');
       
-      filterComplex.push(
-        `${videoInputs}concat=n=${trimData.segments.length}:v=1:a=0[trimmed_video]`,
-        `${audioInputs}concat=n=${trimData.segments.length}:v=0:a=1[trimmed_audio]`
-      );
-
-      inputs = ['[trimmed_video]', '[trimmed_audio]'];
-    } else if (trimData.segments.length === 1) {
-      // Single segment trim
+      // สำหรับ copy mode ใช้ simple trim ไม่ใช้ filter complex
       const segment = trimData.segments[0];
-      filterComplex.push(
-        `[0:v]trim=start=${segment.start}:end=${segment.end}:duration=${segment.duration},setpts=PTS-STARTPTS[trimmed_video]`,
-        `[0:a]atrim=start=${segment.start}:end=${segment.end}:duration=${segment.duration},asetpts=PTS-STARTPTS[trimmed_audio]`
-      );
-      inputs = ['[trimmed_video]', '[trimmed_audio]'];
-    }
-
-    // เพิ่ม overlays ถ้ามี
-    let finalVideoInput = inputs[0];
-    let additionalInputs = [];
-    let overlayInputIndex = 1; // เริ่มจาก input index 1 (0 คือ video หลัก)
-    
-    if (trimData.overlays && trimData.overlays.length > 0) {
-      console.log(`Processing ${trimData.overlays.length} overlays for task ${taskId}`);
       
-      // Download image overlays ก่อน
-      for (let i = 0; i < trimData.overlays.length; i++) {
-        const overlay = trimData.overlays[i];
-        if (overlay.type === 'image' && overlay.content) {
-          const imageInputPath = path.join('uploads', `${taskId}-overlay-${i}.png`);
-          try {
-            console.log(`Downloading overlay image ${i}:`, overlay.content);
-            await downloadWithTimeout(overlay.content, imageInputPath, 30000); // 30 second timeout for images
-            additionalInputs.push(imageInputPath);
-            ffmpegCommand = ffmpegCommand.input(imageInputPath);
-            console.log(`Successfully added image input ${overlayInputIndex}:`, imageInputPath);
-            overlayInputIndex++;
-          } catch (imageError) {
-            console.warn(`Failed to download overlay image ${i}:`, imageError.message);
-            // Continue without this overlay
-          }
-        }
-      }
-
-      // Reset overlay input index for filter processing
-      overlayInputIndex = 1;
-      let imageOverlayIndex = 0;
-      
-      // เพิ่ม overlay filters
-      trimData.overlays.forEach((overlay, index) => {
-        console.log(`Processing overlay ${index}:`, overlay.type, overlay.content);
-        console.log(`Overlay position:`, overlay.position);
-        console.log(`Video dimensions:`, trimData.video_metadata?.width, 'x', trimData.video_metadata?.height);
-        
-        if (overlay.type === 'image' && additionalInputs[imageOverlayIndex]) {
-          // สำหรับ image overlay - คำนวณตำแหน่งและขนาดจากเปอร์เซ็นต์
-          const videoWidth = trimData.video_metadata?.width || 1280;
-          const videoHeight = trimData.video_metadata?.height || 720;
-          
-          const x = Math.round((overlay.position?.x || 0) * videoWidth / 100);
-          const y = Math.round((overlay.position?.y || 0) * videoHeight / 100);
-          const width = Math.round((overlay.position?.width || 25) * videoWidth / 100);
-          const height = Math.round((overlay.position?.height || 25) * videoHeight / 100);
-          const opacity = overlay.style?.opacity || 1;
-          
-          console.log(`Image overlay calculated: ${width}x${height} at ${x},${y} with opacity ${opacity}`);
-          console.log(`Image overlay percentages: ${overlay.position?.width}% x ${overlay.position?.height}% at ${overlay.position?.x}%,${overlay.position?.y}%`);
-          
-          // Scale image with opacity
-          filterComplex.push(
-            `[${overlayInputIndex}:v]scale=${width}:${height},format=rgba,colorchannelmixer=aa=${opacity}[overlay_img${index}]`
-          );
-          
-          // Apply overlay with time constraints
-          filterComplex.push(
-            `${finalVideoInput}[overlay_img${index}]overlay=${x}:${y}:enable='between(t,${overlay.start_time},${overlay.end_time})'[overlay${index}]`
-          );
-          
-          finalVideoInput = `[overlay${index}]`;
-          overlayInputIndex++;
-          imageOverlayIndex++;
-        } else if (overlay.type === 'text') {
-          // สำหรับ text overlay - คำนวณตำแหน่งจากเปอร์เซ็นต์
-          const videoWidth = trimData.video_metadata?.width || 1280;
-          const videoHeight = trimData.video_metadata?.height || 720;
-          
-          const fontsize = overlay.style?.font_size || 24;
-          const fontcolor = overlay.style?.color || 'white';
-          
-          // คำนวณตำแหน่งจากเปอร์เซ็นต์
-          let x = Math.round((overlay.position?.x || 10) * videoWidth / 100);
-          let y = Math.round((overlay.position?.y || 10) * videoHeight / 100);
-          
-          const text = overlay.content.replace(/'/g, "\\\\'").replace(/"/g, '\\\\"'); // Escape quotes
-          
-          console.log(`Text overlay calculated: "${text}" at ${x},${y} (${overlay.position?.x}%, ${overlay.position?.y}%), size ${fontsize}`);
-          console.log(`Text overlay style:`, overlay.style);
-          
-          let drawTextFilter = `${finalVideoInput}drawtext=text='${text}':fontsize=${fontsize}:fontcolor=${fontcolor}`;
-          
-          // Handle text alignment - ปรับตำแหน่ง x ตาม text_align
-          if (overlay.style?.text_align === 'center') {
-            drawTextFilter += `:x=(w-text_w)/2`; // ใช้ width ทั้งหมด สำหรับ center
-          } else if (overlay.style?.text_align === 'right') {
-            drawTextFilter += `:x=w-text_w-${x}`; // จากขวา minus margin
-          } else {
-            drawTextFilter += `:x=${x}`; // left align ใช้ตำแหน่งตรงๆ
-          }
-          
-          drawTextFilter += `:y=${y}`;
-          
-          // เพิ่ม text styling options
-          if (overlay.style?.font_weight === 'bold') {
-            // Note: FFmpeg doesn't directly support font-weight, would need different font file
-          }
-          if (overlay.style?.text_shadow) {
-            drawTextFilter += `:shadowcolor=black:shadowx=2:shadowy=2`;
-          }
-          if (overlay.style?.opacity && overlay.style.opacity !== 1) {
-            drawTextFilter += `:alpha=${overlay.style.opacity}`;
-          }
-          
-          drawTextFilter += `:enable='between(t,${overlay.start_time},${overlay.end_time})'`;
-          
-          console.log(`Generated text filter:`, drawTextFilter);
-          
-          filterComplex.push(
-            `${drawTextFilter}[text${index}]`
-          );
-          finalVideoInput = `[text${index}]`;
-        }
-      });
-      
-      console.log(`Generated filter complex (${filterComplex.length} filters):`, filterComplex);
-    }
-
-    // สร้าง audio filter chain
-    let finalAudioInput = inputs[1];
-    
-    // เพิ่ม audio filter สำหรับ volume adjustment
-    if (trimData.audio_volume && trimData.audio_volume !== 1) {
-      filterComplex.push(`${inputs[1]}volume=${trimData.audio_volume}[adjusted_audio]`);
-      finalAudioInput = '[adjusted_audio]';
-    } else if (trimData.audio_filter) {
-      // ใช้ audio_filter ที่กำหนดมาโดยตรง
-      filterComplex.push(`${inputs[1]}${trimData.audio_filter}[filtered_audio]`);
-      finalAudioInput = '[filtered_audio]';
-    }
-
-    // Scale video ถ้าจำเป็น
-    if (videoSize !== `${trimData.video_metadata?.width || 1280}x${trimData.video_metadata?.height || 720}`) {
-      filterComplex.push(`${finalVideoInput}scale=${videoSize}[scaled]`);
-      finalVideoInput = '[scaled]';
-    }
-
-    // Map final outputs
-    let outputOptions = [
-      '-preset', trimData.processing_mode === 'fast' ? 'fast' : 'medium',
-      '-crf', '23',
-      '-threads', '2',
-      '-movflags', '+faststart',
-      '-maxrate', '3M',
-      '-bufsize', '6M'
-    ];
-
-    // ตั้งค่า filter complex
-    if (filterComplex.length > 0) {
-      ffmpegCommand = ffmpegCommand.complexFilter(filterComplex);
-      
-      // Map final video and audio outputs
-      if (finalVideoInput.startsWith('[') && finalVideoInput.endsWith(']')) {
-        outputOptions.push('-map', finalVideoInput);
-      } else {
-        outputOptions.push('-map', '0:v');
-      }
-      
-      if (finalAudioInput.startsWith('[') && finalAudioInput.endsWith(']')) {
-        outputOptions.push('-map', finalAudioInput);
-      } else {
-        outputOptions.push('-map', '0:a');
-      }
-    }
-
-    // เพิ่ม options
-    ffmpegCommand = ffmpegCommand
-      .videoCodec('libx264')
-      .audioCodec('aac')
-      .outputOptions(outputOptions);
-
-    // Copy streams option - ใช้เมื่อต้องการ copy โดยไม่ encode ใหม่
-    if (trimData.copy_streams) {
-      console.log('Using stream copy mode for better performance');
       ffmpegCommand = ffmpegCommand
+        .seekInput(segment.start)
+        .duration(segment.duration)
         .videoCodec('copy')
-        .audioCodec('copy');
+        .audioCodec('copy')
+        .outputOptions(['-avoid_negative_ts', 'make_zero']);
+        
+    } else {
+      console.log('Using encode mode with filters due to overlays or audio processing');
+      
+      // สร้าง filter complex สำหรับ trim และ overlays
+      let filterComplex = [];
+      let inputs = ['0:v', '0:a'];
+
+      // ถ้ามี segments หลายส่วน ให้ทำการ trim แต่ละส่วนก่อน
+      if (trimData.trim_mode === 'multi' && trimData.segments.length > 1) {
+        // สร้าง trim filters สำหรับแต่ละ segment
+        trimData.segments.forEach((segment, index) => {
+          filterComplex.push(
+            `[0:v]trim=start=${segment.start}:end=${segment.end}:duration=${segment.duration},setpts=PTS-STARTPTS[v${index}]`,
+            `[0:a]atrim=start=${segment.start}:end=${segment.end}:duration=${segment.duration},asetpts=PTS-STARTPTS[a${index}]`
+          );
+        });
+
+        // รวม segments ทั้งหมด
+        const videoInputs = trimData.segments.map((_, i) => `[v${i}]`).join('');
+        const audioInputs = trimData.segments.map((_, i) => `[a${i}]`).join('');
+        
+        filterComplex.push(
+          `${videoInputs}concat=n=${trimData.segments.length}:v=1:a=0[trimmed_video]`,
+          `${audioInputs}concat=n=${trimData.segments.length}:v=0:a=1[trimmed_audio]`
+        );
+
+        inputs = ['[trimmed_video]', '[trimmed_audio]'];
+      } else if (trimData.segments.length === 1) {
+        // Single segment trim
+        const segment = trimData.segments[0];
+        filterComplex.push(
+          `[0:v]trim=start=${segment.start}:end=${segment.end}:duration=${segment.duration},setpts=PTS-STARTPTS[trimmed_video]`,
+          `[0:a]atrim=start=${segment.start}:end=${segment.end}:duration=${segment.duration},asetpts=PTS-STARTPTS[trimmed_audio]`
+        );
+        inputs = ['[trimmed_video]', '[trimmed_audio]'];
+      }
+
+      // เพิ่ม overlays ถ้ามี
+      let finalVideoInput = inputs[0];
+      let additionalInputs = [];
+      let overlayInputIndex = 1; // เริ่มจาก input index 1 (0 คือ video หลัก)
+      
+      if (trimData.overlays && trimData.overlays.length > 0) {
+        console.log(`Processing ${trimData.overlays.length} overlays for task ${taskId}`);
+        
+        // Download image overlays ก่อน
+        for (let i = 0; i < trimData.overlays.length; i++) {
+          const overlay = trimData.overlays[i];
+          if (overlay.type === 'image' && overlay.content) {
+            const imageInputPath = path.join('uploads', `${taskId}-overlay-${i}.png`);
+            try {
+              console.log(`Downloading overlay image ${i}:`, overlay.content);
+              await downloadWithTimeout(overlay.content, imageInputPath, 30000); // 30 second timeout for images
+              additionalInputs.push(imageInputPath);
+              ffmpegCommand = ffmpegCommand.input(imageInputPath);
+              console.log(`Successfully added image input ${overlayInputIndex}:`, imageInputPath);
+              overlayInputIndex++;
+            } catch (imageError) {
+              console.warn(`Failed to download overlay image ${i}:`, imageError.message);
+              // Continue without this overlay
+            }
+          }
+        }
+
+        // Reset overlay input index for filter processing
+        overlayInputIndex = 1;
+        let imageOverlayIndex = 0;
+        
+        // เพิ่ม overlay filters
+        trimData.overlays.forEach((overlay, index) => {
+          console.log(`Processing overlay ${index}:`, overlay.type, overlay.content);
+          console.log(`Overlay position:`, overlay.position);
+          console.log(`Video dimensions:`, trimData.video_metadata?.width, 'x', trimData.video_metadata?.height);
+          
+          if (overlay.type === 'image' && additionalInputs[imageOverlayIndex]) {
+            // สำหรับ image overlay - คำนวณตำแหน่งและขนาดจากเปอร์เซ็นต์
+            const videoWidth = trimData.video_metadata?.width || 1280;
+            const videoHeight = trimData.video_metadata?.height || 720;
+            
+            const x = Math.round((overlay.position?.x || 0) * videoWidth / 100);
+            const y = Math.round((overlay.position?.y || 0) * videoHeight / 100);
+            const width = Math.round((overlay.position?.width || 25) * videoWidth / 100);
+            const height = Math.round((overlay.position?.height || 25) * videoHeight / 100);
+            const opacity = overlay.style?.opacity || 1;
+            
+            console.log(`Image overlay calculated: ${width}x${height} at ${x},${y} with opacity ${opacity}`);
+            console.log(`Image overlay percentages: ${overlay.position?.width}% x ${overlay.position?.height}% at ${overlay.position?.x}%,${overlay.position?.y}%`);
+            
+            // Scale image with opacity
+            filterComplex.push(
+              `[${overlayInputIndex}:v]scale=${width}:${height},format=rgba,colorchannelmixer=aa=${opacity}[overlay_img${index}]`
+            );
+            
+            // Apply overlay with time constraints
+            filterComplex.push(
+              `${finalVideoInput}[overlay_img${index}]overlay=${x}:${y}:enable='between(t,${overlay.start_time},${overlay.end_time})'[overlay${index}]`
+            );
+            
+            finalVideoInput = `[overlay${index}]`;
+            overlayInputIndex++;
+            imageOverlayIndex++;
+          } else if (overlay.type === 'text') {
+            // สำหรับ text overlay - คำนวณตำแหน่งจากเปอร์เซ็นต์
+            const videoWidth = trimData.video_metadata?.width || 1280;
+            const videoHeight = trimData.video_metadata?.height || 720;
+            
+            const fontsize = overlay.style?.font_size || 24;
+            const fontcolor = overlay.style?.color || 'white';
+            
+            // คำนวณตำแหน่งจากเปอร์เซ็นต์
+            let x = Math.round((overlay.position?.x || 10) * videoWidth / 100);
+            let y = Math.round((overlay.position?.y || 10) * videoHeight / 100);
+            
+            const text = overlay.content.replace(/'/g, "\\\\'").replace(/"/g, '\\\\"'); // Escape quotes
+            
+            console.log(`Text overlay calculated: "${text}" at ${x},${y} (${overlay.position?.x}%, ${overlay.position?.y}%), size ${fontsize}`);
+            console.log(`Text overlay style:`, overlay.style);
+            
+            let drawTextFilter = `${finalVideoInput}drawtext=text='${text}':fontsize=${fontsize}:fontcolor=${fontcolor}`;
+            
+            // Handle text alignment - ปรับตำแหน่ง x ตาม text_align
+            if (overlay.style?.text_align === 'center') {
+              drawTextFilter += `:x=(w-text_w)/2`; // ใช้ width ทั้งหมด สำหรับ center
+            } else if (overlay.style?.text_align === 'right') {
+              drawTextFilter += `:x=w-text_w-${x}`; // จากขวา minus margin
+            } else {
+              drawTextFilter += `:x=${x}`; // left align ใช้ตำแหน่งตรงๆ
+            }
+            
+            drawTextFilter += `:y=${y}`;
+            
+            // เพิ่ม text styling options
+            if (overlay.style?.font_weight === 'bold') {
+              // Note: FFmpeg doesn't directly support font-weight, would need different font file
+            }
+            if (overlay.style?.text_shadow) {
+              drawTextFilter += `:shadowcolor=black:shadowx=2:shadowy=2`;
+            }
+            if (overlay.style?.opacity && overlay.style.opacity !== 1) {
+              drawTextFilter += `:alpha=${overlay.style.opacity}`;
+            }
+            
+            drawTextFilter += `:enable='between(t,${overlay.start_time},${overlay.end_time})'`;
+            
+            console.log(`Generated text filter:`, drawTextFilter);
+            
+            filterComplex.push(
+              `${drawTextFilter}[text${index}]`
+            );
+            finalVideoInput = `[text${index}]`;
+          }
+        });
+        
+        console.log(`Generated filter complex (${filterComplex.length} filters):`, filterComplex);
+      }
+
+      // สร้าง audio filter chain
+      let finalAudioInput = inputs[1];
+      
+      // เพิ่ม audio filter สำหรับ volume adjustment
+      if (trimData.audio_volume && trimData.audio_volume !== 1) {
+        filterComplex.push(`${inputs[1]}volume=${trimData.audio_volume}[adjusted_audio]`);
+        finalAudioInput = '[adjusted_audio]';
+      } else if (trimData.audio_filter) {
+        // ใช้ audio_filter ที่กำหนดมาโดยตรง
+        filterComplex.push(`${inputs[1]}${trimData.audio_filter}[filtered_audio]`);
+        finalAudioInput = '[filtered_audio]';
+      }
+
+      // Scale video ถ้าจำเป็น
+      if (videoSize !== `${trimData.video_metadata?.width || 1280}x${trimData.video_metadata?.height || 720}`) {
+        filterComplex.push(`${finalVideoInput}scale=${videoSize}[scaled]`);
+        finalVideoInput = '[scaled]';
+      }
+
+      // Map final outputs
+      let outputOptions = [
+        '-preset', trimData.processing_mode === 'fast' ? 'fast' : 'medium',
+        '-crf', '23',
+        '-threads', '2',
+        '-movflags', '+faststart',
+        '-maxrate', '3M',
+        '-bufsize', '6M'
+      ];
+
+      // ตั้งค่า filter complex
+      if (filterComplex.length > 0) {
+        ffmpegCommand = ffmpegCommand.complexFilter(filterComplex);
+        
+        // Map final video and audio outputs
+        if (finalVideoInput.startsWith('[') && finalVideoInput.endsWith(']')) {
+          outputOptions.push('-map', finalVideoInput);
+        } else {
+          outputOptions.push('-map', '0:v');
+        }
+        
+        if (finalAudioInput.startsWith('[') && finalAudioInput.endsWith(']')) {
+          outputOptions.push('-map', finalAudioInput);
+        } else {
+          outputOptions.push('-map', '0:a');
+        }
+      }
+
+      // เพิ่ม options สำหรับ encode mode
+      ffmpegCommand = ffmpegCommand
+        .videoCodec('libx264')
+        .audioCodec('aac')
+        .outputOptions(outputOptions);
     }
 
     // Event handlers
