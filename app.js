@@ -298,13 +298,7 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     await Task.create(taskData);
 
     // อัปเดตข้อมูลในคอลเลกชัน storage
-    if (taskData.storage) {
-      await Storage.findOneAndUpdate(
-        { _id: new mongoose.Types.ObjectId(taskData.storage) },
-        { $set: { [`transcode.${taskData.quality}`]: 'queue...' } },
-        { new: true }
-      ).exec();
-    }
+    await safeUpdateTranscode(taskData.storage, taskData.quality, 'queue...');
 
     console.log('Process queue started for task:', taskId);
     // เริ่มประมวลผลทันทีหากมีช่องว่าง
@@ -1034,6 +1028,53 @@ async function checkSystemLoad() {
   }
 }
 
+// Helper function สำหรับ update transcode field อย่างปลอดภัย
+async function safeUpdateTranscode(storageId, quality, value, isTrimmingTask = false) {
+  if (!storageId) return;
+  
+  try {
+    const key = isTrimmingTask ? `trim_${quality}` : quality;
+    
+    // ตรวจสอบว่า storage document มี transcode field หรือไม่
+    const storageDoc = await Storage.findById(new mongoose.Types.ObjectId(storageId));
+    if (!storageDoc) {
+      console.error(`Storage document not found: ${storageId}`);
+      return;
+    }
+    
+    if (storageDoc.transcode === null || storageDoc.transcode === undefined) {
+      // สร้าง transcode field ใหม่
+      await Storage.findOneAndUpdate(
+        { _id: new mongoose.Types.ObjectId(storageId) },
+        { $set: { transcode: { [key]: value } } },
+        { new: true }
+      ).exec();
+      console.log(`Created transcode field for storage ${storageId} with ${key}: ${value}`);
+    } else {
+      // update field ปกติ
+      await Storage.findOneAndUpdate(
+        { _id: new mongoose.Types.ObjectId(storageId) },
+        { $set: { [`transcode.${key}`]: value } },
+        { new: true }
+      ).exec();
+    }
+  } catch (error) {
+    console.error(`Error updating transcode for storage ${storageId}:`, error);
+    // Fallback: ลองสร้าง transcode object ใหม่
+    try {
+      const key = isTrimmingTask ? `trim_${quality}` : quality;
+      await Storage.findOneAndUpdate(
+        { _id: new mongoose.Types.ObjectId(storageId) },
+        { $set: { transcode: { [key]: value } } },
+        { new: true }
+      ).exec();
+      console.log(`Fallback: Created new transcode object for storage ${storageId}`);
+    } catch (fallbackError) {
+      console.error(`Fallback also failed for storage ${storageId}:`, fallbackError);
+    }
+  }
+}
+
 // Processing function
 async function processQueue(taskId, taskData) {
   // ตรวจสอบ system load ก่อนเริ่มงาน
@@ -1076,11 +1117,7 @@ async function processQueue(taskId, taskData) {
       console.log('Downloading video from URL:', taskData.url);
       await Task.updateOne({ taskId }, { status: 'downloading' });
       
-      await Storage.findOneAndUpdate(
-        { _id: new mongoose.Types.ObjectId(taskData.storage) },
-        { $set: { [`transcode.${taskData.quality}`]: 'downloading...' } },
-        { new: true }
-      ).exec();
+      await safeUpdateTranscode(taskData.storage, taskData.quality, 'downloading...');
 
       try {
         await downloadWithTimeout(taskData.url, inputPath);
@@ -1142,11 +1179,7 @@ async function processQueue(taskId, taskData) {
         console.log(`Processing progress for task ${taskId}: ${percent}%`);
         await Task.updateOne({ taskId }, { status: 'processing', percent });
 
-        await Storage.findOneAndUpdate(
-          { _id: new mongoose.Types.ObjectId(taskData.storage) },
-          { $set: { [`transcode.${taskData.quality}`]: percent } },
-          { new: true }
-        ).exec();
+        await safeUpdateTranscode(taskData.storage, taskData.quality, percent);
       })
       .on('end', async () => {
         try {
@@ -1177,11 +1210,7 @@ async function processQueue(taskId, taskData) {
           const uploadResult = await s3Client.putObject(params);
           const remoteUrl = `${taskData.space.s3Endpoint}outputs/${outputFileName}`;
 
-          await Storage.findOneAndUpdate(
-            { _id: new mongoose.Types.ObjectId(taskData.storage) },
-            { $set: { [`transcode.${taskData.quality}`]: remoteUrl } },
-            { new: true }
-          ).exec();
+          await safeUpdateTranscode(taskData.storage, taskData.quality, remoteUrl);
 
           console.log("Storage updated with remote URL:", remoteUrl);
           
@@ -1241,11 +1270,7 @@ async function processQueue(taskId, taskData) {
     console.error('Error in processQueue for task:', taskId, error);
     await Task.updateOne({ taskId }, { status: 'error', error: error.message });
     
-    await Storage.findOneAndUpdate(
-      { _id: new mongoose.Types.ObjectId(taskData.storage) },
-      { $set: { [`transcode.${taskData.quality}`]: 'error' } },
-      { new: true }
-    ).exec();
+    await safeUpdateTranscode(taskData.storage, taskData.quality, 'error');
     
     await cleanupTempFiles(inputPath, outputPath);
     concurrentJobs--;
@@ -1446,13 +1471,7 @@ app.post('/trim', async (req, res) => {
     await Task.create(taskData);
 
     // อัปเดตข้อมูลในคอลเลกชัน storage
-    if (taskData.storage) {
-      await Storage.findOneAndUpdate(
-        { _id: new mongoose.Types.ObjectId(taskData.storage) },
-        { $set: { [`transcode.trim_${taskData.quality}`]: 'queue...' } },
-        { new: true }
-      ).exec();
-    }
+    await safeUpdateTranscode(taskData.storage, taskData.quality, 'queue...', true);
 
     console.log('Process trim queue started for task:', taskId);
     // เริ่มประมวลผลทันทีหากมีช่องว่าง
@@ -1511,11 +1530,7 @@ async function processTrimQueue(taskId, taskData) {
     await Task.updateOne({ taskId }, { status: 'downloading' });
     
     if (taskData.storage) {
-      await Storage.findOneAndUpdate(
-        { _id: new mongoose.Types.ObjectId(taskData.storage) },
-        { $set: { [`transcode.trim_${taskData.quality}`]: 'downloading...' } },
-        { new: true }
-      ).exec();
+      await safeUpdateTranscode(taskData.storage, taskData.quality, 'downloading...', true);
     }
 
     try {
@@ -1765,11 +1780,7 @@ async function processTrimQueue(taskId, taskData) {
         await Task.updateOne({ taskId }, { status: 'processing', percent });
 
         if (taskData.storage) {
-          await Storage.findOneAndUpdate(
-            { _id: new mongoose.Types.ObjectId(taskData.storage) },
-            { $set: { [`transcode.trim_${taskData.quality}`]: percent } },
-            { new: true }
-          ).exec();
+          await safeUpdateTranscode(taskData.storage, taskData.quality, percent, true);
         }
       })
       .on('end', async () => {
@@ -1802,11 +1813,7 @@ async function processTrimQueue(taskId, taskData) {
           const remoteUrl = `${taskData.space.s3Endpoint}outputs/${outputFileName}`;
 
           if (taskData.storage) {
-            await Storage.findOneAndUpdate(
-              { _id: new mongoose.Types.ObjectId(taskData.storage) },
-              { $set: { [`transcode.trim_${taskData.quality}`]: remoteUrl } },
-              { new: true }
-            ).exec();
+            await safeUpdateTranscode(taskData.storage, taskData.quality, remoteUrl, true);
           }
 
           console.log("Trim storage updated with remote URL:", remoteUrl);
@@ -1842,11 +1849,7 @@ async function processTrimQueue(taskId, taskData) {
           await Task.updateOne({ taskId }, { status: 'error', error: err.message });
           
           if (taskData.storage) {
-            await Storage.findOneAndUpdate(
-              { _id: new mongoose.Types.ObjectId(taskData.storage) },
-              { $set: { [`transcode.trim_${taskData.quality}`]: 'error' } },
-              { new: true }
-            ).exec();
+            await safeUpdateTranscode(taskData.storage, taskData.quality, 'error', true);
           }
           
           await cleanupTempFiles(inputPath, outputPath);
@@ -1896,11 +1899,7 @@ async function processTrimQueue(taskId, taskData) {
     await Task.updateOne({ taskId }, { status: 'error', error: error.message });
     
     if (taskData.storage) {
-      await Storage.findOneAndUpdate(
-        { _id: new mongoose.Types.ObjectId(taskData.storage) },
-        { $set: { [`transcode.trim_${taskData.quality}`]: 'error' } },
-        { new: true }
-      ).exec();
+      await safeUpdateTranscode(taskData.storage, taskData.quality, 'error', true);
     }
     
     await cleanupTempFiles(inputPath, outputPath);
