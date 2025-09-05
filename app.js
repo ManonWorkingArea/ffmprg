@@ -482,6 +482,69 @@ app.delete('/task/:taskId', async (req, res) => {
   }
 });
 
+// Endpoint: Delete completed task (alternative path for compatibility)
+app.delete('/delete/task/:taskId', async (req, res) => {
+  const taskId = req.params.taskId;
+  
+  try {
+    const task = await Task.findOne({ taskId });
+    
+    if (!task) {
+      return res.status(404).json({ success: false, error: 'Task not found' });
+    }
+    
+    // Only allow deletion of completed, error, or stopped tasks
+    if (!['completed', 'error', 'stopped'].includes(task.status)) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Can only delete completed, error, or stopped tasks' 
+      });
+    }
+    
+    // Clean up output file if exists
+    if (task.outputFile) {
+      const outputPath = path.join(__dirname, 'outputs', task.outputFile.replace('/', ''));
+      try {
+        if (fs.existsSync(outputPath)) {
+          fs.unlinkSync(outputPath);
+          console.log('Deleted output file:', outputPath);
+        }
+      } catch (fileError) {
+        console.error('Error deleting output file:', fileError);
+      }
+    }
+    
+    // Clean up input file if exists
+    if (task.inputPath) {
+      try {
+        if (fs.existsSync(task.inputPath)) {
+          fs.unlinkSync(task.inputPath);
+          console.log('Deleted input file:', task.inputPath);
+        }
+      } catch (fileError) {
+        console.error('Error deleting input file:', fileError);
+      }
+    }
+    
+    // Delete task from database
+    await Task.deleteOne({ taskId });
+    
+    console.log(`Task ${taskId} deleted successfully`);
+    res.json({ 
+      success: true, 
+      message: `Task ${taskId} deleted successfully` 
+    });
+    
+  } catch (error) {
+    console.error('Error deleting task:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to delete task',
+      details: error.message 
+    });
+  }
+});
+
 // เพิ่ม endpoint สำหรับดูสถานะระบบโดยรวม
 app.get('/system-status', async (req, res) => {
   try {
