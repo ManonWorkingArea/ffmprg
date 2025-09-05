@@ -2111,47 +2111,37 @@ async function processCloudflareStreamQueue(taskId, taskData) {
 
     if (uploadResponse.data.success) {
       const streamData = uploadResponse.data.result;
+      const streamUID = streamData.uid;
       
-      // Update task with Cloudflare Stream data - initial status
+      console.log(`Cloudflare Stream upload initiated: ${streamUID}`);
+      
+      // Update task with Cloudflare Stream UID immediately
       await Task.updateOne({ taskId }, { 
         status: 'processing', 
-        percent: 80, // Upload completed, now waiting for processing
-        cloudflareStreamId: streamData.uid,
-        cloudflarePlaybackUrl: `https://customer-${streamData.uid}.cloudflarestream.com/${streamData.uid}/manifest/video.m3u8`,
-        cloudflareStreamStatus: streamData.status?.state || 'pending',
+        percent: 60,
+        cloudflareStreamUID: streamUID,
+        cloudflareStreamStatus: streamData.status?.state || 'uploading',
         cloudflareStreamMeta: {
           ...taskData.cloudflareStreamMeta,
           cloudflareData: streamData,
-          uploadedAt: new Date().toISOString(),
-          webhookConfigured: true
+          uploadedAt: new Date().toISOString()
         }
       });
 
-      console.log(`Cloudflare Stream upload completed for task: ${taskId}`);
-      console.log(`Stream ID: ${streamData.uid}`);
+      // Update storage with stream:uid tag immediately
+      if (taskData.storage) {
+        await safeUpdateTranscode(taskData.storage, 'stream', `stream:${streamUID}`, true);
+        console.log(`Updated storage ${taskData.storage} with stream:${streamUID}`);
+      }
+
+      console.log(`Stream ID: ${streamUID}`);
       console.log(`Initial status: ${streamData.status?.state}`);
-      console.log(`Webhook will handle status updates automatically`);
+
+      // Start polling for video status using Retrieve Video Details API
+      await pollVideoStatus(taskId, streamUID, taskData);
 
       // Clean up temp file
       await cleanupTempFiles(tempFilePath, null);
-
-      // Check if already ready (unlikely but possible)
-      if (streamData.status?.state === 'ready' && streamData.readyToStream) {
-        await Task.updateOne({ taskId }, { 
-          status: 'completed', 
-          percent: 100,
-          cloudflareStreamStatus: 'ready'
-        });
-        
-        if (taskData.storage) {
-          const streamUrl = `https://customer-${streamData.uid}.cloudflarestream.com/${streamData.uid}/watch`;
-          await safeUpdateTranscode(taskData.storage, 'stream', streamUrl, true);
-        }
-        
-        console.log(`✅ Stream was already ready: ${streamData.uid}`);
-      } else {
-        console.log(`⏳ Stream processing initiated. Waiting for webhook updates: ${streamData.uid}`);
-      }
 
     } else {
       throw new Error(`Cloudflare Stream upload failed: ${uploadResponse.data.errors?.map(e => e.message).join(', ') || 'Unknown error'}`);
@@ -2182,6 +2172,138 @@ async function processCloudflareStreamQueue(taskId, taskData) {
     concurrentJobs--;
     console.log(`Cloudflare Stream task ${taskId} finished. Active jobs: ${concurrentJobs}/${MAX_CONCURRENT_JOBS}`);
     processNextQueue();
+  }
+}
+
+// Function to poll video status using Retrieve Video Details API
+async function pollVideoStatus(taskId, streamUID, taskData) {
+  const maxPollingAttempts = 60; // 60 attempts * 10 seconds = 10 minutes max
+  let pollingAttempts = 0;
+  let isReady = false;
+
+  console.log(`Starting to poll video status for Stream UID: ${streamUID}`);
+
+  while (pollingAttempts < maxPollingAttempts && !isReady) {
+    pollingAttempts++;
+    
+    try {
+      // Wait 10 seconds between polls
+      await new Promise(resolve => setTimeout(resolve, 10000));
+
+      // Use Retrieve Video Details API
+      const statusResponse = await axios.get(
+        `${CLOUDFLARE_API_BASE}/accounts/${CLOUDFLARE_ACCOUNT_ID}/stream/${streamUID}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${CLOUDFLARE_API_TOKEN}`
+          },
+          timeout: 30000 // 30 second timeout
+        }
+      );
+
+      if (statusResponse.data.success) {
+        const videoData = statusResponse.data.result;
+        const status = videoData.status?.state || 'unknown';
+        const progress = Math.min(60 + (pollingAttempts * 2), 95); // Progress from 60% to 95%
+        
+        console.log(`Poll attempt ${pollingAttempts}/${maxPollingAttempts} for ${streamUID}: status=${status}, ready=${videoData.readyToStream}`);
+
+        // Update task progress
+        await Task.updateOne({ taskId }, { 
+          percent: progress,
+          cloudflareStreamStatus: status,
+          cloudflareStreamMeta: {
+            ...taskData.cloudflareStreamMeta,
+            cloudflareData: videoData,
+            lastPolled: new Date().toISOString(),
+            pollingAttempts: pollingAttempts
+          }
+        });
+
+        // Check if video is ready
+        if (status === 'ready' && videoData.readyToStream) {
+          isReady = true;
+          
+          const playbackUrl = `https://customer-${streamUID}.cloudflarestream.com/${streamUID}/manifest/video.m3u8`;
+          const streamUrl = videoData.preview || `https://customer-${streamUID}.cloudflarestream.com/${streamUID}/watch`;
+          
+          // Final update - mark as completed
+          await Task.updateOne({ taskId }, { 
+            status: 'completed',
+            percent: 100,
+            cloudflareStreamStatus: 'ready',
+            cloudflarePlaybackUrl: playbackUrl,
+            cloudflareStreamMeta: {
+              ...taskData.cloudflareStreamMeta,
+              cloudflareData: videoData,
+              completedAt: new Date().toISOString(),
+              duration: videoData.duration,
+              size: videoData.size
+            }
+          });
+
+          // Update storage with final stream URL
+          if (taskData.storage) {
+            await safeUpdateTranscode(taskData.storage, 'stream', streamUrl, true);
+            console.log(`Updated storage ${taskData.storage} with final stream URL: ${streamUrl}`);
+          }
+
+          console.log(`✅ Stream is ready: ${streamUID}`);
+          console.log(`   Playback URL: ${playbackUrl}`);
+          console.log(`   Stream URL: ${streamUrl}`);
+          break;
+        }
+
+        // Check for error states
+        if (status === 'error') {
+          throw new Error(`Cloudflare Stream processing failed: ${videoData.status?.errorReasonText || 'Unknown error'}`);
+        }
+
+        // Update storage with current status
+        if (taskData.storage && pollingAttempts % 5 === 0) { // Update every 5 polls (50 seconds)
+          await safeUpdateTranscode(taskData.storage, 'stream', `stream:${streamUID}:${status}`, true);
+        }
+
+      } else {
+        console.warn(`Failed to get video status for ${streamUID}:`, statusResponse.data.errors);
+        
+        // If 404, video might have been deleted
+        if (statusResponse.status === 404) {
+          throw new Error('Video not found on Cloudflare Stream');
+        }
+      }
+
+    } catch (pollError) {
+      console.error(`Polling error for ${streamUID}, attempt ${pollingAttempts}:`, pollError.message);
+      
+      // Continue polling unless it's a critical error
+      if (pollError.response?.status === 404) {
+        throw new Error('Video not found on Cloudflare Stream');
+      }
+      
+      // If too many consecutive errors, break
+      if (pollingAttempts > 5 && pollError.response?.status >= 400) {
+        console.error(`Too many API errors for ${streamUID}, stopping polling`);
+        break;
+      }
+    }
+  }
+
+  // Check if we timed out
+  if (!isReady) {
+    console.error(`Polling timeout for ${streamUID} after ${pollingAttempts} attempts`);
+    
+    await Task.updateOne({ taskId }, { 
+      status: 'error',
+      error: `Stream processing timeout after ${pollingAttempts} attempts (${pollingAttempts * 10 / 60} minutes)`,
+      cloudflareStreamStatus: 'timeout'
+    });
+    
+    if (taskData.storage) {
+      await safeUpdateTranscode(taskData.storage, 'stream', 'error:timeout', true);
+    }
+    
+    throw new Error(`Stream processing timeout after ${pollingAttempts} attempts`);
   }
 }
 
