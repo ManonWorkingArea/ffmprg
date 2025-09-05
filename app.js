@@ -1594,9 +1594,10 @@ app.post('/trim', async (req, res) => {
   const site = trimData.site || req.body.site;
   let taskId;
 
-  // Validate required fields
-  if (!trimData.input_url) {
-    return res.status(400).json({ success: false, error: 'input_url is required' });
+  // Validate required fields - support both 'url' and 'input_url'
+  const inputUrl = trimData.url || trimData.input_url;
+  if (!inputUrl) {
+    return res.status(400).json({ success: false, error: 'url is required' });
   }
 
   if (!site) {
@@ -1643,9 +1644,9 @@ app.post('/trim', async (req, res) => {
   }
 
   try {
-    // Check for existing task
+    // Check for existing task - use the normalized inputUrl
     const existingTask = await Task.findOne({ 
-      url: trimData.input_url, 
+      url: inputUrl, 
       type: 'trim',
       'trimData.segments': { $elemMatch: { $in: trimData.segments.map(s => s.id) } }
     });
@@ -1657,6 +1658,67 @@ app.post('/trim', async (req, res) => {
 
     taskId = uuidv4();
 
+    // Normalize the trim data to use consistent field names
+    const normalizedTrimData = {
+      ...trimData,
+      input_url: inputUrl, // Ensure input_url is set for backward compatibility
+      url: inputUrl,       // Keep the new url field
+      // Convert new overlay format to old format for processing
+      overlays: []
+    };
+
+    // Convert text_overlays to overlays format
+    if (trimData.text_overlays && Array.isArray(trimData.text_overlays)) {
+      trimData.text_overlays.forEach(textOverlay => {
+        normalizedTrimData.overlays.push({
+          type: 'text',
+          content: textOverlay.text,
+          position: {
+            x: textOverlay.position?.x || 10,
+            y: textOverlay.position?.y || 10
+          },
+          style: {
+            font_size: textOverlay.font_size || 24,
+            color: textOverlay.color || '#FFFFFF',
+            opacity: textOverlay.style?.opacity || 1,
+            bold: textOverlay.style?.bold || false,
+            italic: textOverlay.style?.italic || false,
+            text_shadow: textOverlay.style?.shadow || false,
+            stroke_width: textOverlay.style?.stroke_width || 0,
+            stroke_color: textOverlay.style?.stroke_color || '#000000'
+          },
+          start_time: textOverlay.timing?.start || 0,
+          end_time: textOverlay.timing?.end || trimData.segments[0]?.duration || 0
+        });
+      });
+    }
+
+    // Convert image_overlays to overlays format
+    if (trimData.image_overlays && Array.isArray(trimData.image_overlays)) {
+      trimData.image_overlays.forEach(imageOverlay => {
+        normalizedTrimData.overlays.push({
+          type: 'image',
+          content: imageOverlay.image_url,
+          position: {
+            x: imageOverlay.position?.x || 10,
+            y: imageOverlay.position?.y || 10,
+            width: imageOverlay.position?.width || 25,
+            height: imageOverlay.position?.height || 25
+          },
+          style: {
+            opacity: imageOverlay.style?.opacity || 1,
+            rotation: imageOverlay.style?.rotation || 0,
+            scale_x: imageOverlay.style?.scale_x || 1,
+            scale_y: imageOverlay.style?.scale_y || 1
+          },
+          start_time: imageOverlay.timing?.start || 0,
+          end_time: imageOverlay.timing?.end || trimData.segments[0]?.duration || 0
+        });
+      });
+    }
+
+    console.log(`Converted ${trimData.text_overlays?.length || 0} text overlays and ${trimData.image_overlays?.length || 0} image overlays`);
+
     // Construct task data with trim information
     const taskData = {
       taskId,
@@ -1665,15 +1727,23 @@ app.post('/trim', async (req, res) => {
       quality: trimData.quality || '720p',
       createdAt: Date.now(),
       outputFile: null,
-      url: trimData.input_url,
-      trimData: trimData, // Store all trim data
+      url: inputUrl,
+      trimData: normalizedTrimData, // Store normalized trim data
       site: hostnameData,
       space: spaceData,
       storage: trimData.storage,
       retryCount: 0
     };
 
-    console.log('Trim task data created:', { taskId, inputUrl: trimData.input_url, segments: trimData.segments.length });
+    console.log('Trim task data created:', { 
+      taskId, 
+      inputUrl: inputUrl, 
+      segments: trimData.segments.length,
+      textOverlays: trimData.text_overlays?.length || 0,
+      imageOverlays: trimData.image_overlays?.length || 0,
+      audioVolume: trimData.audio_volume || 1.0,
+      copyStreams: trimData.copy_streams || false
+    });
     await Task.create(taskData);
 
     // อัปเดตข้อมูลในคอลเลกชัน storage
@@ -2354,7 +2424,7 @@ async function processTrimQueue(taskId, taskData) {
   let additionalInputs = []; // For storing overlay image paths
 
   try {
-    console.log('Downloading video from URL:', trimData.input_url);
+    console.log('Downloading video from URL:', trimData.input_url || trimData.url);
     await Task.updateOne({ taskId }, { status: 'downloading' });
     
     if (taskData.storage) {
@@ -2362,7 +2432,7 @@ async function processTrimQueue(taskId, taskData) {
     }
 
     try {
-      await downloadWithTimeout(trimData.input_url, inputPath);
+      await downloadWithTimeout(trimData.input_url || trimData.url, inputPath);
       console.log('Video downloaded to:', inputPath);
     } catch (downloadError) {
       console.error('Download failed for trim task:', taskId, downloadError);
@@ -2557,15 +2627,28 @@ async function processTrimQueue(taskId, taskData) {
       console.log(`Generated filter complex (${filterComplex.length} filters):`, filterComplex);
     }
 
+    // สร้าง audio filter chain
+    let finalAudioInput = inputs[1];
+    
+    // เพิ่ม audio filter สำหรับ volume adjustment
+    if (trimData.audio_volume && trimData.audio_volume !== 1) {
+      filterComplex.push(`${inputs[1]}volume=${trimData.audio_volume}[adjusted_audio]`);
+      finalAudioInput = '[adjusted_audio]';
+    } else if (trimData.audio_filter) {
+      // ใช้ audio_filter ที่กำหนดมาโดยตรง
+      filterComplex.push(`${inputs[1]}${trimData.audio_filter}[filtered_audio]`);
+      finalAudioInput = '[filtered_audio]';
+    }
+
     // Scale video ถ้าจำเป็น
-    if (videoSize !== `${trimData.video_metadata.width}x${trimData.video_metadata.height}`) {
+    if (videoSize !== `${trimData.video_metadata?.width || 1280}x${trimData.video_metadata?.height || 720}`) {
       filterComplex.push(`${finalVideoInput}scale=${videoSize}[scaled]`);
       finalVideoInput = '[scaled]';
     }
 
     // Map final outputs
     let outputOptions = [
-      '-preset', 'fast',
+      '-preset', trimData.processing_mode === 'fast' ? 'fast' : 'medium',
       '-crf', '23',
       '-threads', '2',
       '-movflags', '+faststart',
@@ -2583,7 +2666,12 @@ async function processTrimQueue(taskId, taskData) {
       } else {
         outputOptions.push('-map', '0:v');
       }
-      outputOptions.push('-map', inputs[1] || '0:a');
+      
+      if (finalAudioInput.startsWith('[') && finalAudioInput.endsWith(']')) {
+        outputOptions.push('-map', finalAudioInput);
+      } else {
+        outputOptions.push('-map', '0:a');
+      }
     }
 
     // เพิ่ม options
@@ -2592,9 +2680,12 @@ async function processTrimQueue(taskId, taskData) {
       .audioCodec('aac')
       .outputOptions(outputOptions);
 
-    // ถ้ามี audio volume adjustment
-    if (trimData.audio_volume && trimData.audio_volume !== 1) {
-      ffmpegCommand = ffmpegCommand.audioFilters(`volume=${trimData.audio_volume}`);
+    // Copy streams option - ใช้เมื่อต้องการ copy โดยไม่ encode ใหม่
+    if (trimData.copy_streams) {
+      console.log('Using stream copy mode for better performance');
+      ffmpegCommand = ffmpegCommand
+        .videoCodec('copy')
+        .audioCodec('copy');
     }
 
     // Event handlers
