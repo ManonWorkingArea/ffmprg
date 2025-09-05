@@ -1921,10 +1921,9 @@ app.post('/webhook/cloudflare-stream', async (req, res) => {
         }
       });
       
-      // Update storage with final stream URL
+      // Update storage with final stream UID (not URL)
       if (task.storage) {
-        const streamUrl = `https://customer-${uid}.cloudflarestream.com/${uid}/watch`;
-        await safeUpdateTranscode(task.storage, 'stream', streamUID, false);
+        await safeUpdateTranscode(task.storage, 'stream', uid, false);
       }
       
       console.log(`✅ Cloudflare Stream task ${task.taskId} completed via webhook`);
@@ -1950,7 +1949,7 @@ app.post('/webhook/cloudflare-stream', async (req, res) => {
       console.log(`❌ Cloudflare Stream task ${task.taskId} failed via webhook: ${status?.errorReasonText}`);
       
     } else if (status?.state === 'inprogress') {
-      // Video is still processing
+      // Video is still processing - show percentage in storage
       const percent = Math.min(50 + Math.floor(Math.random() * 40), 95); // Estimate progress 50-95%
       await Task.updateOne({ taskId: task.taskId }, {
         status: 'processing',
@@ -1962,6 +1961,11 @@ app.post('/webhook/cloudflare-stream', async (req, res) => {
           lastUpdate: new Date().toISOString()
         }
       });
+      
+      // Update storage with percentage instead of UID during processing
+      if (task.storage) {
+        await safeUpdateTranscode(task.storage, 'stream', `${percent}%`, false);
+      }
       
       console.log(`⏳ Cloudflare Stream task ${task.taskId} still processing via webhook (${percent}%)`);
     }
@@ -2049,6 +2053,12 @@ async function processCloudflareStreamQueue(taskId, taskData) {
   try {
     // Update task status to downloading
     await Task.updateOne({ taskId }, { status: 'downloading', percent: 5 });
+    
+    // Update storage with initial downloading status
+    if (taskData.storage) {
+      await safeUpdateTranscode(taskData.storage, 'stream', '5%', false);
+    }
+    
     console.log(`Downloading video from URL for Cloudflare Stream: ${taskData.url}`);
 
     // Download video file
@@ -2062,6 +2072,11 @@ async function processCloudflareStreamQueue(taskId, taskData) {
 
     // Update task status to uploading
     await Task.updateOne({ taskId }, { status: 'processing', percent: 20 });
+    
+    // Update storage with upload starting status
+    if (taskData.storage) {
+      await safeUpdateTranscode(taskData.storage, 'stream', '20%', false);
+    }
     console.log(`Starting upload to Cloudflare Stream for task: ${taskId}`);
 
     // Create form data for Cloudflare Stream upload
@@ -2102,6 +2117,12 @@ async function processCloudflareStreamQueue(taskId, taskData) {
         if (progressEvent.total) {
           const percent = Math.round(20 + (progressEvent.loaded / progressEvent.total) * 70); // 20-90%
           await Task.updateOne({ taskId }, { percent });
+          
+          // Update storage with upload percentage
+          if (taskData.storage) {
+            await safeUpdateTranscode(taskData.storage, 'stream', `${percent}%`, false);
+          }
+          
           console.log(`Cloudflare Stream upload progress for task ${taskId}: ${percent}%`);
         }
       }
@@ -2128,10 +2149,10 @@ async function processCloudflareStreamQueue(taskId, taskData) {
         }
       });
 
-      // Update storage with stream:uid tag immediately
+      // Update storage with initial processing status instead of UID
       if (taskData.storage) {
-        await safeUpdateTranscode(taskData.storage, 'stream', streamUID, false);
-        console.log(`Updated storage ${taskData.storage} with stream UID: ${streamUID}`);
+        await safeUpdateTranscode(taskData.storage, 'stream', 'uploading...', false);
+        console.log(`Updated storage ${taskData.storage} with initial status: uploading...`);
       }
 
       console.log(`Stream ID: ${streamUID}`);
@@ -2259,9 +2280,9 @@ async function pollVideoStatus(taskId, streamUID, taskData) {
           throw new Error(`Cloudflare Stream processing failed: ${videoData.status?.errorReasonText || 'Unknown error'}`);
         }
 
-        // Update storage with current status (optional - could be removed if not needed)
-        if (taskData.storage && pollingAttempts % 5 === 0) { // Update every 5 polls (50 seconds)
-          await safeUpdateTranscode(taskData.storage, 'stream', `processing:${status}`, false);
+        // Update storage with processing percentage instead of status
+        if (taskData.storage && pollingAttempts % 3 === 0) { // Update every 3 polls (30 seconds)
+          await safeUpdateTranscode(taskData.storage, 'stream', `${progress}%`, false);
         }
 
       } else {
