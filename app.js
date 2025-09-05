@@ -1707,7 +1707,7 @@ app.post('/trim', async (req, res) => {
 });
 
 // Endpoint: Upload video to Cloudflare Stream
-app.post('/stream-upload', async (req, res) => {
+app.post('/stream-upload', upload.none(), async (req, res) => {
   console.log('Received Cloudflare Stream upload request');
   console.log('Request body:', req.body);
   
