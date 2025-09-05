@@ -268,15 +268,41 @@
                                                 <i :class="getJobTypeIcon(task.type)" class="mr-1"></i>
                                                 ประเภทงาน: {{ getJobType(task.type) }}
                                             </p>
-                                            <p>คุณภาพ: {{ task.quality }}</p>
+                                            <p v-if="task.type !== 'stream'">คุณภาพ: {{ task.quality }}</p>
                                             <p>สร้างเมื่อ: {{ formatDate(task.createdAt) }}</p>
                                             <p>สถานะ: {{ getStatusText(task.status) }}</p>
                                             <p v-if="task.inputFileSizeFormatted">ขนาดต้นฉบับ: {{ task.inputFileSizeFormatted }}</p>
                                             <p v-if="task.outputFileSizeFormatted && task.status === 'completed'">ขนาดหลังแปลง: {{ task.outputFileSizeFormatted }}</p>
-                                            <p v-if="task.compressionRatio && task.status === 'completed'" 
+                                                                                        <p v-if="task.compressionRatio && task.status === 'completed'" 
                                                :class="task.compressionRatio > 0 ? 'text-green-600' : 'text-orange-600'">
                                                {{ task.compressionRatio > 0 ? `ลดขนาด: ${task.compressionRatio}%` : 'ขนาดเพิ่มขึ้น' }}
                                             </p>
+                                            <p v-if="task.type === 'stream' && task.cloudflareStreamId">
+                                                <i class="fas fa-id-card mr-1"></i>
+                                                Stream ID: {{ task.cloudflareStreamId }}
+                                            </p>
+                                            <p v-if="task.type === 'stream' && task.cloudflareStreamStatus">
+                                                <i class="fas fa-info-circle mr-1"></i>
+                                                CF Status: {{ task.cloudflareStreamStatus }}
+                                            </p>
+                                        </div>
+                                            <!-- Cloudflare Stream specific info -->
+                                            <div v-if="task.type === 'stream' && task.streamData">
+                                                <p v-if="task.streamData.uid" class="text-blue-600">
+                                                    <i class="fas fa-video mr-1"></i>Stream UID: {{ task.streamData.uid }}
+                                                </p>
+                                                <p v-if="task.streamData.duration" class="text-gray-600">
+                                                    <i class="fas fa-clock mr-1"></i>ระยะเวลา: {{ Math.round(task.streamData.duration) }} วินาที
+                                                </p>
+                                                <p v-if="task.streamData.size" class="text-gray-600">
+                                                    <i class="fas fa-file-video mr-1"></i>ขนาดไฟล์: {{ formatFileSize(task.streamData.size) }}
+                                                </p>
+                                                <p v-if="task.streamData.readyToStream !== undefined" 
+                                                   :class="task.streamData.readyToStream ? 'text-green-600' : 'text-yellow-600'">
+                                                    <i :class="task.streamData.readyToStream ? 'fas fa-check-circle' : 'fas fa-clock'" class="mr-1"></i>
+                                                    {{ task.streamData.readyToStream ? 'พร้อมสตรีม' : 'กำลังประมวลผล' }}
+                                                </p>
+                                            </div>
                                         </div>
                                     </div>
                                     
@@ -295,7 +321,24 @@
                                             <i class="fas fa-stop mr-1"></i>หยุด
                                         </button>
                                         
-                                        <a v-if="task.status === 'completed'" 
+                                        <!-- Cloudflare Stream links -->
+                                        <div v-if="task.type === 'stream' && task.status === 'completed' && task.streamData" class="flex gap-2">
+                                            <a v-if="task.streamData.preview" 
+                                               :href="task.streamData.preview"
+                                               target="_blank"
+                                               class="text-xs px-3 py-1.5 border border-blue-200 text-blue-600 rounded hover:bg-blue-50">
+                                                <i class="fas fa-play mr-1"></i>ดูสตรีม
+                                            </a>
+                                            <a v-if="task.streamData.thumbnail" 
+                                               :href="task.streamData.thumbnail"
+                                               target="_blank"
+                                               class="text-xs px-3 py-1.5 border border-green-200 text-green-600 rounded hover:bg-green-50">
+                                                <i class="fas fa-image mr-1"></i>Thumbnail
+                                            </a>
+                                        </div>
+                                        
+                                        <!-- Regular download for convert tasks -->
+                                        <a v-if="task.type !== 'stream' && task.status === 'completed'" 
                                            :href="'/outputs/' + task.taskId + '-output.mp4'"
                                            class="text-xs px-3 py-1.5 border border-green-200 text-green-600 rounded hover:bg-green-50">
                                             <i class="fas fa-download mr-1"></i>ดาวน์โหลด
@@ -669,7 +712,8 @@
                 getJobType(type) {
                     const types = {
                         'convert': 'แปลงวิดีโอ',
-                        'trim': 'ตัดต่อวิดีโอ'
+                        'trim': 'ตัดต่อวิดีโอ',
+                        'stream': 'อัปโหลด Cloudflare Stream'
                     }
                     return types[type] || 'แปลงวิดีโอ' // Default to convert if type is undefined
                 },
@@ -677,7 +721,8 @@
                 getJobTypeIcon(type) {
                     const icons = {
                         'convert': 'fas fa-exchange-alt',
-                        'trim': 'fas fa-cut'
+                        'trim': 'fas fa-cut',
+                        'stream': 'fas fa-cloud-upload-alt'
                     }
                     return icons[type] || 'fas fa-exchange-alt' // Default to convert icon
                 },
@@ -844,6 +889,19 @@
                         this.notificationMessage = 'เกิดข้อผิดพลาดในการตรวจสอบสถานะ: ' + error.message
                         setTimeout(() => this.showNotification = false, 5000)
                     }
+                },
+
+                copyStreamId(streamId) {
+                    navigator.clipboard.writeText(streamId).then(() => {
+                        this.showNotification = true
+                        this.notificationMessage = `คัดลอก Stream ID แล้ว: ${streamId}`
+                        setTimeout(() => this.showNotification = false, 3000)
+                    }).catch(err => {
+                        console.error('ไม่สามารถคัดลอกได้:', err)
+                        this.showNotification = true
+                        this.notificationMessage = 'ไม่สามารถคัดลอก Stream ID ได้'
+                        setTimeout(() => this.showNotification = false, 3000)
+                    })
                 }
             }
         })

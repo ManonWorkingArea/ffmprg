@@ -9,12 +9,21 @@ const axios = require('axios');
 const fs = require('fs'); 
 const mongoose = require('mongoose');
 const { S3 } = require('@aws-sdk/client-s3');
-const osu = require('node-os-utils')
-const cpu = osu.cpu
-const mem = osu.mem
-const drive = osu.drive
+const osu = require('node-os-utils');
+const FormData = require('form-data');
+const cpu = osu.cpu;
+const mem = osu.mem;
+const drive = osu.drive;
+
+// Load environment variables
+require('dotenv').config();
 
 const { getHostnameData, getSpaceData } = require('./middleware/hostname'); // Import the function
+
+// Cloudflare Stream Configuration
+const CLOUDFLARE_API_TOKEN = 'xTBA4Ynm-AGnY5UtGPMMQtLvmEpvFmgK1XHaQmMl';
+const CLOUDFLARE_ACCOUNT_ID = '92d5cc09d52b3239a9bfccf8dbd1bddb'; // Cloudflare Account ID
+const CLOUDFLARE_API_BASE = 'https://api.cloudflare.com/client/v4';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -55,7 +64,7 @@ mongoose.connect('mongodb+srv://vue:Qazwsx1234!!@cloudmongodb.wpc62e9.mongodb.ne
 // สร้าง Schema และ Model สำหรับคิว
 const taskSchema = new mongoose.Schema({
   taskId: String,
-  type: { type: String, default: 'convert' }, // Type of task: 'convert' or 'trim'
+  type: { type: String, default: 'convert' }, // Type of task: 'convert', 'trim', or 'stream'
   status: String,
   quality: String,
   createdAt: Date,
@@ -65,7 +74,12 @@ const taskSchema = new mongoose.Schema({
   url: String,
   site: Object,
   space: Object,
-  storage: String
+  storage: String,
+  // Cloudflare Stream specific fields
+  cloudflareStreamId: String,
+  cloudflarePlaybackUrl: String,
+  cloudflareStreamStatus: String,
+  cloudflareStreamMeta: Object
 });
 
 const Task = mongoose.model('Queue', taskSchema);
@@ -188,6 +202,131 @@ app.post('/metadata', async (req, res) => {
 });
 
 // Grouped Endpoints
+
+// Endpoint: Upload video to Cloudflare Stream
+app.post('/stream', async (req, res) => {
+  console.log('Received Cloudflare Stream upload request');
+  const { url, meta = {}, site } = req.body;
+  let taskId;
+
+  // Validate required fields
+  if (!url) {
+    console.log('Video URL is required');
+    return res.status(400).json({ success: false, error: 'Video URL is required' });
+  }
+
+  if (!site) {
+    console.log('Site is required');
+    return res.status(400).json({ success: false, error: 'Site is required' });
+  }
+
+  // Validate Cloudflare Stream configuration
+  if (!process.env.CLOUDFLARE_API_TOKEN || !process.env.CLOUDFLARE_ACCOUNT_ID) {
+    console.log('Cloudflare Stream configuration missing');
+    return res.status(500).json({ 
+      success: false, 
+      error: 'Cloudflare Stream not configured. Please set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID environment variables.' 
+    });
+  }
+
+  // ตรวจสอบคิวที่รอ
+  const queuedCount = await Task.countDocuments({ status: 'queued' });
+  const processingCount = await Task.countDocuments({ status: 'processing' });
+  
+  // ตรวจสอบ system load
+  const systemLoad = await checkSystemLoad();
+  
+  if (queuedCount > 50) {
+    return res.status(429).json({ 
+      success: false, 
+      error: 'Queue is full. Please try again later.',
+      queueStatus: { queued: queuedCount, processing: processingCount }
+    });
+  }
+
+  // Fetch hostname data
+  let hostnameData;
+  let spaceData;
+  try {
+    hostnameData = await getHostnameData(site);
+    console.log('Fetched hostname data:', hostnameData);
+    if (!hostnameData) {
+      console.log('Hostname not found');
+      return res.status(404).json({ success: false, error: 'Hostname not found' });
+    }
+  } catch (error) {
+    console.error('Failed to fetch hostname data:', error);
+    return res.status(500).json({ success: false, error: 'Failed to fetch hostname data' });
+  }
+
+  try {
+    spaceData = await getSpaceData(hostnameData.spaceId);
+    console.log('Fetched space data:', spaceData);
+    if (!spaceData) {
+      console.log('Space not found');
+      return res.status(404).json({ success: false, error: 'Space not found' });
+    }
+  } catch (error) {
+    console.error('Failed to fetch space data:', error);
+    return res.status(500).json({ success: false, error: 'Failed to fetch space data' });
+  }
+
+  try {
+    // Check for existing task with same URL
+    const existingTask = await Task.findOne({ url: url, type: 'stream' });
+    if (existingTask) {
+      console.log('Existing Cloudflare Stream task found:', existingTask.taskId);
+      return res.json({ success: true, taskId: existingTask.taskId });
+    }
+
+    taskId = uuidv4();
+
+    // Construct task data for Cloudflare Stream
+    const taskData = {
+      taskId,
+      type: 'stream', // New type for Cloudflare Stream uploads
+      status: 'queued',
+      createdAt: Date.now(),
+      url: url,
+      streamMeta: meta, // Store Cloudflare Stream metadata
+      site: hostnameData,
+      space: spaceData,
+      storage: req.body.storage,
+      retryCount: 0
+    };
+
+    console.log('Cloudflare Stream task data created:', taskData);
+    await Task.create(taskData);
+
+    // อัปเดตข้อมูลในคอลเลกชัน storage
+    if (taskData.storage) {
+      await safeUpdateTranscode(taskData.storage, 'stream', 'queue...', true);
+    }
+
+    console.log('Process Cloudflare Stream queue started for task:', taskId);
+    // เริ่มประมวลผลทันทีหากมีช่องว่าง
+    if (concurrentJobs < MAX_CONCURRENT_JOBS) {
+      processCloudflareStreamQueue(taskId, taskData);
+    }
+
+    res.json({ 
+      success: true, 
+      taskId, 
+      message: 'Video queued for Cloudflare Stream upload',
+      site: hostnameData,
+      space: spaceData,
+      queuePosition: queuedCount + 1
+    });
+
+  } catch (error) {
+    console.error('Error in Cloudflare Stream endpoint:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Internal server error',
+      details: error.message 
+    });
+  }
+});
 
 // Endpoint: Add conversion task to queue
 app.post('/convert', upload.single('video'), async (req, res) => {
@@ -330,6 +469,70 @@ app.post('/convert', upload.single('video'), async (req, res) => {
     res.status(500).json({ 
       success: false, 
       error: 'Internal server error',
+      details: error.message 
+    });
+  }
+});
+
+// Endpoint: Get Cloudflare Stream video details
+app.get('/stream/:taskId', async (req, res) => {
+  const taskId = req.params.taskId;
+  
+  try {
+    const task = await Task.findOne({ taskId, type: 'stream' });
+    
+    if (!task) {
+      return res.status(404).json({ success: false, error: 'Cloudflare Stream task not found' });
+    }
+    
+    // If task is completed and has stream data, optionally fetch latest from Cloudflare
+    if (task.status === 'completed' && task.streamData?.uid) {
+      try {
+        const cloudflareHeaders = {
+          'Authorization': `Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,
+          'Content-Type': 'application/json'
+        };
+        
+        const statusResponse = await axios.get(
+          `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/stream/${task.streamData.uid}`,
+          { headers: cloudflareHeaders, timeout: 10000 }
+        );
+        
+        if (statusResponse.data.success) {
+          const latestStreamData = statusResponse.data.result;
+          
+          // Update task with latest data
+          await Task.updateOne({ taskId }, { 
+            streamData: {
+              ...task.streamData,
+              ...latestStreamData
+            }
+          });
+          
+          return res.json({
+            success: true,
+            task: {
+              ...task.toObject(),
+              streamData: latestStreamData
+            }
+          });
+        }
+      } catch (cloudflareError) {
+        console.warn('Failed to fetch latest Cloudflare Stream data:', cloudflareError.message);
+        // Continue with existing data
+      }
+    }
+    
+    res.json({
+      success: true,
+      task: task
+    });
+    
+  } catch (error) {
+    console.error('Error fetching Cloudflare Stream task:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch stream task',
       details: error.message 
     });
   }
@@ -1326,6 +1529,9 @@ async function processNextQueue() {
         if (nextTask.type === 'trim') {
           console.log(`🎬 Starting trim processing for task: ${nextTask.taskId}`);
           processTrimQueue(nextTask.taskId, nextTask);
+        } else if (nextTask.type === 'stream') {
+          console.log(`☁️ Starting Cloudflare Stream processing for task: ${nextTask.taskId}`);
+          processCloudflareStreamQueue(nextTask.taskId, nextTask);
         } else {
           console.log(`🎬 Starting convert processing for task: ${nextTask.taskId}`);
           processQueue(nextTask.taskId, nextTask);
@@ -1499,6 +1705,447 @@ app.post('/trim', async (req, res) => {
     });
   }
 });
+
+// Endpoint: Upload video to Cloudflare Stream
+app.post('/stream-upload', async (req, res) => {
+  console.log('Received Cloudflare Stream upload request');
+  const { url, title, description } = req.body;
+  const site = req.body.site;
+  let taskId;
+
+  // Validate required fields
+  if (!url) {
+    return res.status(400).json({ success: false, error: 'Video URL is required' });
+  }
+
+  if (!site) {
+    return res.status(400).json({ success: false, error: 'Site is required' });
+  }
+
+  // Check if Account ID is configured
+  if (!CLOUDFLARE_ACCOUNT_ID) {
+    return res.status(500).json({ 
+      success: false, 
+      error: 'Cloudflare Account ID not configured. Please contact administrator.' 
+    });
+  }
+
+  // ตรวจสอบคิวที่รอ
+  const queuedCount = await Task.countDocuments({ status: 'queued' });
+  const processingCount = await Task.countDocuments({ status: 'processing' });
+  
+  if (queuedCount > 50) {
+    return res.status(429).json({ 
+      success: false, 
+      error: 'Queue is full. Please try again later.',
+      queueStatus: { queued: queuedCount, processing: processingCount }
+    });
+  }
+
+  // Fetch hostname data
+  let hostnameData;
+  let spaceData;
+  try {
+    hostnameData = await getHostnameData(site);
+    console.log('Fetched hostname data:', hostnameData);
+    if (!hostnameData) {
+      return res.status(404).json({ success: false, error: 'Hostname not found' });
+    }
+
+    spaceData = await getSpaceData(hostnameData.spaceId);
+    console.log('Fetched space data:', spaceData);
+    if (!spaceData) {
+      return res.status(404).json({ success: false, error: 'Space not found' });
+    }
+  } catch (error) {
+    console.error('Failed to fetch hostname/space data:', error);
+    return res.status(500).json({ success: false, error: 'Failed to fetch configuration data' });
+  }
+
+  try {
+    // Check for existing task
+    const existingTask = await Task.findOne({ 
+      url: url, 
+      type: 'stream'
+    });
+    
+    if (existingTask) {
+      console.log('Existing Cloudflare Stream task found:', existingTask.taskId);
+      return res.json({ 
+        success: true, 
+        taskId: existingTask.taskId,
+        cloudflareStreamId: existingTask.cloudflareStreamId,
+        playbackUrl: existingTask.cloudflarePlaybackUrl
+      });
+    }
+
+    taskId = uuidv4();
+
+    // Construct task data for Cloudflare Stream
+    const taskData = {
+      taskId,
+      type: 'stream', // New type for Cloudflare Stream
+      status: 'queued',
+      createdAt: Date.now(),
+      url: url,
+      site: hostnameData,
+      space: spaceData,
+      storage: req.body.storage,
+      retryCount: 0,
+      // Cloudflare Stream specific data
+      cloudflareStreamMeta: {
+        title: title || 'Untitled Video',
+        description: description || '',
+        originalUrl: url
+      }
+    };
+
+    console.log('Cloudflare Stream task data created:', { taskId, inputUrl: url });
+    await Task.create(taskData);
+
+    console.log('Process Cloudflare Stream queue started for task:', taskId);
+    // เริ่มประมวลผลทันทีหากมีช่องว่าง
+    if (concurrentJobs < MAX_CONCURRENT_JOBS) {
+      processCloudflareStreamQueue(taskId, taskData);
+    }
+
+    res.json({ 
+      success: true, 
+      taskId, 
+      type: 'stream',
+      site: hostnameData,
+      space: spaceData,
+      queuePosition: queuedCount + 1,
+      message: 'Video upload to Cloudflare Stream has been queued'
+    });
+
+  } catch (error) {
+    console.error('Error in stream-upload endpoint:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Internal server error',
+      details: error.message 
+    });
+  }
+});
+
+// Endpoint: Get Cloudflare Stream video info
+app.get('/stream-info/:streamId', async (req, res) => {
+  const streamId = req.params.streamId;
+  
+  if (!CLOUDFLARE_ACCOUNT_ID || CLOUDFLARE_ACCOUNT_ID === 'YOUR_ACCOUNT_ID') {
+    return res.status(500).json({ 
+      success: false, 
+      error: 'Cloudflare Account ID not configured' 
+    });
+  }
+  
+  try {
+    const response = await axios.get(
+      `${CLOUDFLARE_API_BASE}/accounts/${CLOUDFLARE_ACCOUNT_ID}/stream/${streamId}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${CLOUDFLARE_API_TOKEN}`
+        }
+      }
+    );
+    
+    if (response.data.success) {
+      res.json({
+        success: true,
+        stream: response.data.result
+      });
+    } else {
+      res.status(404).json({
+        success: false,
+        error: 'Stream not found'
+      });
+    }
+  } catch (error) {
+    console.error('Error fetching stream info:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch stream information'
+    });
+  }
+});
+
+// Processing function for Cloudflare Stream tasks
+async function processCloudflareStreamQueue(taskId, taskData) {
+  // ตรวจสอบ system load ก่อนเริ่มงาน
+  const systemLoad = await checkSystemLoad();
+  if (!systemLoad.canProcess) {
+    console.log(`System overloaded (CPU: ${systemLoad.cpuUsage}%, Memory: ${systemLoad.memoryUsage}%). Cloudflare Stream task ${taskId} delayed.`);
+    setTimeout(() => processCloudflareStreamQueue(taskId, taskData), 30000);
+    return;
+  }
+
+  // ตรวจสอบจำนวนงานที่กำลังทำพร้อมกัน
+  if (concurrentJobs >= MAX_CONCURRENT_JOBS) {
+    console.log(`Max concurrent jobs reached (${MAX_CONCURRENT_JOBS}). Cloudflare Stream task ${taskId} remains queued.`);
+    return;
+  }
+
+  concurrentJobs++;
+  console.log(`Processing Cloudflare Stream queue for task: ${taskId} (Active jobs: ${concurrentJobs}/${MAX_CONCURRENT_JOBS})`);
+
+  const tempFilePath = path.join('uploads', `${taskId}-stream-input.mp4`);
+
+  try {
+    // Update task status to downloading
+    await Task.updateOne({ taskId }, { status: 'downloading', percent: 5 });
+    console.log(`Downloading video from URL for Cloudflare Stream: ${taskData.url}`);
+
+    // Download video file
+    try {
+      await downloadWithTimeout(taskData.url, tempFilePath);
+      console.log('Video downloaded successfully for Cloudflare Stream:', tempFilePath);
+    } catch (downloadError) {
+      console.error('Download failed for Cloudflare Stream task:', taskId, downloadError);
+      throw new Error(`Download failed: ${downloadError.message}`);
+    }
+
+    // Update task status to uploading
+    await Task.updateOne({ taskId }, { status: 'processing', percent: 20 });
+    console.log(`Starting upload to Cloudflare Stream for task: ${taskId}`);
+
+    // Create form data for Cloudflare Stream upload
+    const formData = new FormData();
+    formData.append('file', fs.createReadStream(tempFilePath));
+    
+    // Add metadata
+    const metadata = {
+      name: taskData.cloudflareStreamMeta.title,
+      meta: {
+        description: taskData.cloudflareStreamMeta.description,
+        source: taskData.cloudflareStreamMeta.originalUrl,
+        uploadedBy: 'ffmprg-system',
+        taskId: taskId
+      }
+    };
+    
+    formData.append('meta', JSON.stringify(metadata));
+
+    // Upload to Cloudflare Stream
+    const uploadUrl = `${CLOUDFLARE_API_BASE}/accounts/${CLOUDFLARE_ACCOUNT_ID}/stream`;
+    
+    console.log(`Uploading to Cloudflare Stream: ${uploadUrl}`);
+    
+    const uploadResponse = await axios.post(uploadUrl, formData, {
+      headers: {
+        'Authorization': `Bearer ${CLOUDFLARE_API_TOKEN}`,
+        ...formData.getHeaders()
+      },
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+      timeout: 30 * 60 * 1000, // 30 minutes timeout
+      onUploadProgress: async (progressEvent) => {
+        if (progressEvent.total) {
+          const percent = Math.round(20 + (progressEvent.loaded / progressEvent.total) * 70); // 20-90%
+          await Task.updateOne({ taskId }, { percent });
+          console.log(`Cloudflare Stream upload progress for task ${taskId}: ${percent}%`);
+        }
+      }
+    });
+
+    console.log('Cloudflare Stream upload response:', uploadResponse.data);
+
+    if (uploadResponse.data.success) {
+      const streamData = uploadResponse.data.result;
+      
+      // Update task with Cloudflare Stream data
+      await Task.updateOne({ taskId }, { 
+        status: 'completed', 
+        percent: 100,
+        cloudflareStreamId: streamData.uid,
+        cloudflarePlaybackUrl: `https://customer-${streamData.uid}.cloudflarestream.com/${streamData.uid}/manifest/video.m3u8`,
+        cloudflareStreamStatus: streamData.status.state,
+        cloudflareStreamMeta: {
+          ...taskData.cloudflareStreamMeta,
+          cloudflareData: streamData
+        }
+      });
+
+      console.log(`Cloudflare Stream upload completed for task: ${taskId}`);
+      console.log(`Stream ID: ${streamData.uid}`);
+      console.log(`Playback URL: https://customer-${streamData.uid}.cloudflarestream.com/${streamData.uid}/manifest/video.m3u8`);
+
+      // Clean up temp file
+      await cleanupTempFiles(tempFilePath, null);
+
+    } else {
+      throw new Error(`Cloudflare Stream upload failed: ${uploadResponse.data.errors?.map(e => e.message).join(', ') || 'Unknown error'}`);
+    }
+
+  } catch (error) {
+    console.error('Error in processCloudflareStreamQueue for task:', taskId, error);
+    await Task.updateOne({ taskId }, { 
+      status: 'error', 
+      error: error.message,
+      cloudflareStreamStatus: 'error'
+    });
+    
+    // Clean up temp file
+    await cleanupTempFiles(tempFilePath, null);
+  } finally {
+    concurrentJobs--;
+    console.log(`Cloudflare Stream task ${taskId} finished. Active jobs: ${concurrentJobs}/${MAX_CONCURRENT_JOBS}`);
+    processNextQueue();
+  }
+}
+    console.log('Cloudflare Stream task status updated to processing for task:', taskId);
+
+    if (taskData.storage) {
+      await safeUpdateTranscode(taskData.storage, 'stream', 'uploading to Cloudflare Stream...', true);
+    }
+
+    // Prepare Cloudflare Stream API request
+    const cloudflareApiUrl = `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/stream/copy`;
+    const cloudflareHeaders = {
+      'Authorization': `Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,
+      'Content-Type': 'application/json'
+    };
+
+    // Prepare metadata
+    const streamMeta = {
+      name: taskData.streamMeta.name || `Video ${taskId}`,
+      ...taskData.streamMeta
+    };
+
+    const requestBody = {
+      url: taskData.url,
+      meta: streamMeta
+    };
+
+    console.log(`Uploading to Cloudflare Stream: ${taskData.url}`);
+    await Task.updateOne({ taskId }, { percent: 30 });
+
+    // Upload to Cloudflare Stream
+    const streamResponse = await axios.post(cloudflareApiUrl, requestBody, { 
+      headers: cloudflareHeaders,
+      timeout: 60000 // 1 minute timeout for initial request
+    });
+
+    if (!streamResponse.data.success) {
+      throw new Error(`Cloudflare Stream API error: ${JSON.stringify(streamResponse.data.errors)}`);
+    }
+
+    const streamData = streamResponse.data.result;
+    console.log(`Cloudflare Stream upload initiated. Video UID: ${streamData.uid}`);
+
+    // Update task with stream data
+    await Task.updateOne({ taskId }, { 
+      percent: 50,
+      streamData: {
+        uid: streamData.uid,
+        preview: streamData.preview,
+        thumbnail: streamData.thumbnail,
+        created: streamData.created,
+        meta: streamData.meta
+      }
+    });
+
+    // Poll Cloudflare Stream until video is ready
+    const maxPollingAttempts = 120; // 10 minutes max (5 second intervals)
+    let pollingAttempts = 0;
+    let isReady = false;
+
+    while (!isReady && pollingAttempts < maxPollingAttempts) {
+      pollingAttempts++;
+      
+      try {
+        // Wait 5 seconds between polls
+        await new Promise(resolve => setTimeout(resolve, 5000));
+
+        // Check video status
+        const statusResponse = await axios.get(
+          `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/stream/${streamData.uid}`,
+          { headers: cloudflareHeaders, timeout: 30000 }
+        );
+
+        if (statusResponse.data.success) {
+          const videoData = statusResponse.data.result;
+          const progress = Math.min(50 + (pollingAttempts * 2), 95); // Progress from 50% to 95%
+          
+          await Task.updateOne({ taskId }, { 
+            percent: progress,
+            streamData: {
+              uid: videoData.uid,
+              preview: videoData.preview,
+              thumbnail: videoData.thumbnail,
+              readyToStream: videoData.readyToStream,
+              status: videoData.status,
+              created: videoData.created,
+              modified: videoData.modified,
+              size: videoData.size,
+              duration: videoData.duration,
+              meta: videoData.meta
+            }
+          });
+
+          console.log(`Cloudflare Stream polling attempt ${pollingAttempts}: ${videoData.status?.state}, ready: ${videoData.readyToStream}`);
+
+          if (videoData.readyToStream) {
+            isReady = true;
+            console.log(`Cloudflare Stream video is ready! UID: ${streamData.uid}`);
+            
+            // Final update
+            await Task.updateOne({ taskId }, { 
+              status: 'completed',
+              percent: 100,
+              completedAt: Date.now()
+            });
+
+            // Update storage with stream URL
+            if (taskData.storage) {
+              const streamUrl = videoData.preview || `https://customer-${process.env.CLOUDFLARE_CUSTOMER_CODE || 'CUSTOMER_CODE'}.cloudflarestream.com/${streamData.uid}/watch`;
+              await safeUpdateTranscode(taskData.storage, 'stream', streamUrl, true);
+            }
+
+            console.log(`Cloudflare Stream task ${taskId} completed successfully`);
+            break;
+          }
+
+          // Check for error states
+          if (videoData.status?.state === 'error') {
+            throw new Error(`Cloudflare Stream processing failed: ${videoData.status.errorReasonText || 'Unknown error'}`);
+          }
+        } else {
+          console.warn(`Cloudflare Stream status check failed for ${streamData.uid}:`, statusResponse.data.errors);
+        }
+
+      } catch (pollError) {
+        console.error(`Polling error for task ${taskId}, attempt ${pollingAttempts}:`, pollError.message);
+        
+        // Continue polling unless it's a critical error
+        if (pollError.response?.status === 404) {
+          throw new Error('Video not found on Cloudflare Stream');
+        }
+      }
+    }
+
+    // Check if we timed out
+    if (!isReady) {
+      throw new Error(`Cloudflare Stream processing timeout after ${maxPollingAttempts} attempts (${maxPollingAttempts * 5 / 60} minutes)`);
+    }
+
+  } catch (error) {
+    console.error('Error in processCloudflareStreamQueue for task:', taskId, error);
+    await Task.updateOne({ taskId }, { 
+      status: 'error', 
+      error: error.message,
+      errorAt: Date.now()
+    });
+    
+    if (taskData.storage) {
+      await safeUpdateTranscode(taskData.storage, 'stream', 'error', true);
+    }
+  } finally {
+    concurrentJobs--;
+    console.log(`Cloudflare Stream task ${taskId} finished. Active jobs: ${concurrentJobs}/${MAX_CONCURRENT_JOBS}`);
+    processNextQueue();
+  }
+}
 
 // Processing function for trim tasks
 async function processTrimQueue(taskId, taskData) {
