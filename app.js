@@ -41,6 +41,26 @@ function generateInputPath(taskId, url, prefix = 'input') {
   return path.join('uploads', `${taskId}-${prefix}.${extension}`);
 }
 
+// Helper function to convert FFmpeg timemark to seconds
+function convertTimemarkToSeconds(timemark) {
+  if (!timemark || typeof timemark !== 'string') return 0;
+  
+  // Format: HH:MM:SS.ss
+  const parts = timemark.split(':');
+  if (parts.length !== 3) return 0;
+  
+  try {
+    const hours = parseInt(parts[0]) || 0;
+    const minutes = parseInt(parts[1]) || 0;
+    const seconds = parseFloat(parts[2]) || 0;
+    
+    return hours * 3600 + minutes * 60 + seconds;
+  } catch (error) {
+    console.warn('Error parsing timemark:', timemark, error);
+    return 0;
+  }
+}
+
 // Cloudflare Stream Configuration
 const CLOUDFLARE_API_TOKEN = 'xTBA4Ynm-AGnY5UtGPMMQtLvmEpvFmgK1XHaQmMl';
 const CLOUDFLARE_ACCOUNT_ID = '92d5cc09d52b3239a9bfccf8dbd1bddb'; // Cloudflare Account ID
@@ -1378,6 +1398,7 @@ async function processQueue(taskId, taskData) {
     console.log('Output file:', outputPath);
     
     // ตรวจสอบข้อมูลไฟล์ input
+    let videoDuration = null;
     try {
       const inputStats = fs.statSync(inputPath);
       console.log(`Input file size: ${(inputStats.size / 1024 / 1024).toFixed(2)} MB`);
@@ -1387,6 +1408,25 @@ async function processQueue(taskId, taskData) {
       console.log(`Input file extension: ${inputExt}`);
       if (inputExt === '.webm') {
         console.log('⚠️  WebM input detected - adding compatibility options');
+        
+        // ใช้ ffprobe เพื่อหาความยาวไฟล์ WebM
+        try {
+          const ffprobeResult = await new Promise((resolve, reject) => {
+            ffmpeg.ffprobe(inputPath, (err, metadata) => {
+              if (err) reject(err);
+              else resolve(metadata);
+            });
+          });
+          
+          videoDuration = ffprobeResult.format?.duration;
+          if (videoDuration) {
+            console.log(`📹 WebM video duration: ${videoDuration}s`);
+          } else {
+            console.log('⚠️  Could not determine WebM duration from ffprobe');
+          }
+        } catch (ffprobeError) {
+          console.warn('ffprobe failed for WebM file:', ffprobeError.message);
+        }
       }
     } catch (statError) {
       console.error('Error reading input file stats:', statError);
@@ -1419,14 +1459,26 @@ async function processQueue(taskId, taskData) {
         }
       })
       .on('progress', async (progress) => {
-        const percent = Math.round(progress.percent) || 0;
-        console.log(`Processing progress for task ${taskId}: ${percent}%`);
+        let percent = Math.round(progress.percent) || 0;
         
         // เพิ่มการ log สำหรับ webm debugging
         if (path.extname(inputPath).toLowerCase() === '.webm') {
           console.log(`WebM progress details: timemark=${progress.timemark}, frames=${progress.frames}, fps=${progress.currentFps}`);
+          
+          // ถ้า percent เป็น 0 แต่มี frames แสดงว่า FFmpeg ทำงานอยู่
+          // ลองประมาณจาก timemark
+          if (percent === 0 && progress.timemark) {
+            const timemarkSeconds = convertTimemarkToSeconds(progress.timemark);
+            if (timemarkSeconds > 0) {
+              // ใช้ความยาวจริงจาก ffprobe หรือประมาณ
+              const estimatedDuration = videoDuration || 30; // ใช้ duration จริงหรือประมาณ 30 วินาที
+              percent = Math.min(Math.round((timemarkSeconds / estimatedDuration) * 100), 95);
+              console.log(`📊 WebM estimated progress: ${percent}% (${timemarkSeconds.toFixed(1)}s/${estimatedDuration}s)`);
+            }
+          }
         }
         
+        console.log(`Processing progress for task ${taskId}: ${percent}%`);
         await Task.updateOne({ taskId }, { status: 'processing', percent });
         await safeUpdateTranscode(taskData.storage, taskData.quality, percent);
       })
