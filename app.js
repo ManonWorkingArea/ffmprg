@@ -20,6 +20,27 @@ require('dotenv').config();
 
 const { getHostnameData, getSpaceData } = require('./middleware/hostname'); // Import the function
 
+// Helper function to get file extension from URL
+function getFileExtensionFromURL(url) {
+  try {
+    // Remove query parameters and get the pathname
+    const pathname = new URL(url).pathname;
+    const extension = path.extname(pathname).toLowerCase();
+    
+    // Return extension without the dot, default to mp4 if no extension
+    return extension ? extension.slice(1) : 'mp4';
+  } catch (error) {
+    console.log('Error parsing URL for extension:', url, error.message);
+    return 'mp4'; // Default fallback
+  }
+}
+
+// Helper function to generate input file path with correct extension
+function generateInputPath(taskId, url, prefix = 'input') {
+  const extension = getFileExtensionFromURL(url);
+  return path.join('uploads', `${taskId}-${prefix}.${extension}`);
+}
+
 // Cloudflare Stream Configuration
 const CLOUDFLARE_API_TOKEN = 'xTBA4Ynm-AGnY5UtGPMMQtLvmEpvFmgK1XHaQmMl';
 const CLOUDFLARE_ACCOUNT_ID = '92d5cc09d52b3239a9bfccf8dbd1bddb'; // Cloudflare Account ID
@@ -1313,7 +1334,7 @@ async function processQueue(taskId, taskData) {
       default: videoSize = '1280x720';
     }
 
-    inputPath = taskData.inputPath || path.join('uploads', `${taskId}-input.mp4`);
+    inputPath = taskData.inputPath || generateInputPath(taskId, taskData.url);
 
     // If URL provided, download the video
     if (taskData.url) {
@@ -2118,7 +2139,7 @@ async function processCloudflareStreamQueue(taskId, taskData) {
   concurrentJobs++;
   console.log(`Processing Cloudflare Stream queue for task: ${taskId} (Active jobs: ${concurrentJobs}/${MAX_CONCURRENT_JOBS})`);
 
-  const tempFilePath = path.join('uploads', `${taskId}-stream-input.mp4`);
+  const tempFilePath = generateInputPath(taskId, taskData.url, 'stream-input');
 
   try {
     // Update task status to downloading
@@ -2420,7 +2441,7 @@ async function processTrimQueue(taskId, taskData) {
   const trimData = taskData.trimData;
   const outputFileName = trimData.filename || `${taskId}-trimmed.mp4`;
   const outputPath = path.join(__dirname, 'outputs', outputFileName);
-  const inputPath = path.join('uploads', `${taskId}-input.mp4`);
+  const inputPath = generateInputPath(taskId, trimData.input_url || trimData.url);
   let additionalInputs = []; // For storing overlay image paths
 
   // สร้าง output directory ถ้ายังไม่มี
