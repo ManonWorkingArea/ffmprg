@@ -1374,17 +1374,37 @@ async function processQueue(taskId, taskData) {
 
     // เริ่มกระบวนการ ffmpeg พร้อม timeout
     console.log('Starting ffmpeg process for task:', taskId);
+    console.log('Input file:', inputPath);
+    console.log('Output file:', outputPath);
+    
+    // ตรวจสอบข้อมูลไฟล์ input
+    try {
+      const inputStats = fs.statSync(inputPath);
+      console.log(`Input file size: ${(inputStats.size / 1024 / 1024).toFixed(2)} MB`);
+      
+      // ตรวจสอบ extension
+      const inputExt = path.extname(inputPath).toLowerCase();
+      console.log(`Input file extension: ${inputExt}`);
+      if (inputExt === '.webm') {
+        console.log('⚠️  WebM input detected - adding compatibility options');
+      }
+    } catch (statError) {
+      console.error('Error reading input file stats:', statError);
+    }
     
     const ffmpegProcess = ffmpeg(inputPath)
       .size(videoSize)
       .videoCodec('libx264')
+      .audioCodec('aac')
       .outputOptions([
         '-preset', 'fast',        // เปลี่ยนจาก medium เป็น fast เพื่อความเร็ว
         '-crf', '23',             // ปรับจาก 24 เป็น 23 (คุณภาพดีขึ้นเล็กน้อย)
         '-threads', '2',          // ใช้ 2 threads ต่องาน (2 งาน = 4 threads รวม)
         '-movflags', '+faststart',// optimized for streaming
         '-maxrate', '3M',         // เพิ่ม bitrate จาก 2M เป็น 3M
-        '-bufsize', '6M'          // เพิ่ม buffer จาก 4M เป็น 6M
+        '-bufsize', '6M',         // เพิ่ม buffer จาก 4M เป็น 6M
+        '-avoid_negative_ts', 'make_zero', // Fix timing issues with webm
+        '-fflags', '+genpts'      // Generate presentation timestamps
       ])
       .on('start', (commandLine) => {
         console.log('Spawned FFmpeg with command: ' + commandLine);
@@ -1401,8 +1421,13 @@ async function processQueue(taskId, taskData) {
       .on('progress', async (progress) => {
         const percent = Math.round(progress.percent) || 0;
         console.log(`Processing progress for task ${taskId}: ${percent}%`);
+        
+        // เพิ่มการ log สำหรับ webm debugging
+        if (path.extname(inputPath).toLowerCase() === '.webm') {
+          console.log(`WebM progress details: timemark=${progress.timemark}, frames=${progress.frames}, fps=${progress.currentFps}`);
+        }
+        
         await Task.updateOne({ taskId }, { status: 'processing', percent });
-
         await safeUpdateTranscode(taskData.storage, taskData.quality, percent);
       })
       .on('end', async () => {
@@ -1474,18 +1499,75 @@ async function processQueue(taskId, taskData) {
     // เก็บ reference ของ process และเพิ่ม timeout
     ffmpegProcesses[taskId] = ffmpegProcess;
     
-    // ตั้ง timeout สำหรับ ffmpeg process
+    // ตั้ง timeout สำหรับ ffmpeg process (เพิ่มเวลาสำหรับ webm)
+    const inputExt = path.extname(inputPath).toLowerCase();
+    const timeoutDuration = inputExt === '.webm' ? FFMPEG_TIMEOUT * 1.5 : FFMPEG_TIMEOUT; // เพิ่มเวลา 50% สำหรับ webm
+    
+    console.log(`Setting FFmpeg timeout: ${timeoutDuration / 1000}s for ${inputExt} file`);
+    
     const timeoutId = setTimeout(async () => {
       if (ffmpegProcesses[taskId]) {
-        console.log(`FFmpeg timeout for task: ${taskId}`);
+        console.log(`FFmpeg timeout for task: ${taskId} (${inputExt} file)`);
         ffmpegProcesses[taskId].kill('SIGTERM');
         delete ffmpegProcesses[taskId];
-        await Task.updateOne({ taskId }, { status: 'error', error: 'Processing timeout' });
+        await Task.updateOne({ taskId }, { status: 'error', error: `Processing timeout for ${inputExt} file` });
+        await safeUpdateTranscode(taskData.storage, taskData.quality, 'error');
         await cleanupTempFiles(inputPath, outputPath);
         concurrentJobs--;
         processNextQueue();
       }
-    }, FFMPEG_TIMEOUT);
+    }, timeoutDuration);
+    
+    // เพิ่มการตรวจสอบ progress stuck สำหรับ webm
+    if (inputExt === '.webm') {
+      let lastProgressTime = Date.now();
+      let lastPercent = 0;
+      let progressStuckCount = 0;
+      
+      const progressCheckInterval = setInterval(async () => {
+        if (!ffmpegProcesses[taskId]) {
+          clearInterval(progressCheckInterval);
+          return;
+        }
+        
+        const currentTask = await Task.findOne({ taskId });
+        if (!currentTask) {
+          clearInterval(progressCheckInterval);
+          return;
+        }
+        
+        const currentPercent = currentTask.percent || 0;
+        const currentTime = Date.now();
+        
+        // ถ้า progress ไม่เปลี่ยนแปลงมากกว่า 2 นาที
+        if (currentPercent === lastPercent && (currentTime - lastProgressTime) > 120000) {
+          progressStuckCount++;
+          console.log(`⚠️  WebM progress stuck at ${currentPercent}% for ${progressStuckCount * 2} minutes`);
+          
+          // ถ้า stuck มากกว่า 3 ครั้ง (6 นาที) ให้ยกเลิก
+          if (progressStuckCount >= 3) {
+            console.log(`❌ Killing stuck WebM process for task: ${taskId}`);
+            clearInterval(progressCheckInterval);
+            clearTimeout(timeoutId);
+            
+            if (ffmpegProcesses[taskId]) {
+              ffmpegProcesses[taskId].kill('SIGKILL');
+              delete ffmpegProcesses[taskId];
+              await Task.updateOne({ taskId }, { status: 'error', error: 'WebM processing stuck - terminated' });
+              await safeUpdateTranscode(taskData.storage, taskData.quality, 'error');
+              await cleanupTempFiles(inputPath, outputPath);
+              concurrentJobs--;
+              processNextQueue();
+            }
+          }
+        } else if (currentPercent !== lastPercent) {
+          // Progress เปลี่ยน - reset counter
+          lastPercent = currentPercent;
+          lastProgressTime = currentTime;
+          progressStuckCount = 0;
+        }
+      }, 120000); // ตรวจสอบทุก 2 นาที
+    }
 
     // เริ่มการประมวลผล
     ffmpegProcess.save(outputPath);
