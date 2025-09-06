@@ -18,6 +18,17 @@ const drive = osu.drive;
 // Load environment variables
 require('dotenv').config();
 
+// Global error handlers
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // Don't exit the process, just log the error
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  // Don't exit the process, just log the error
+});
+
 const { getHostnameData, getSpaceData } = require('./middleware/hostname'); // Import the function
 
 // Helper function to get file extension from URL
@@ -43,18 +54,32 @@ function generateInputPath(taskId, url, prefix = 'input') {
 
 // Helper function to convert FFmpeg timemark to seconds
 function convertTimemarkToSeconds(timemark) {
-  if (!timemark || typeof timemark !== 'string') return 0;
+  if (!timemark || typeof timemark !== 'string') {
+    console.warn('Invalid timemark:', timemark);
+    return 0;
+  }
   
   // Format: HH:MM:SS.ss
   const parts = timemark.split(':');
-  if (parts.length !== 3) return 0;
+  if (parts.length !== 3) {
+    console.warn('Invalid timemark format:', timemark);
+    return 0;
+  }
   
   try {
     const hours = parseInt(parts[0]) || 0;
     const minutes = parseInt(parts[1]) || 0;
     const seconds = parseFloat(parts[2]) || 0;
     
-    return hours * 3600 + minutes * 60 + seconds;
+    const totalSeconds = hours * 3600 + minutes * 60 + seconds;
+    
+    // ตรวจสอบผลลัพธ์
+    if (isNaN(totalSeconds) || totalSeconds < 0) {
+      console.warn('Invalid calculated seconds from timemark:', timemark, '→', totalSeconds);
+      return 0;
+    }
+    
+    return totalSeconds;
   } catch (error) {
     console.warn('Error parsing timemark:', timemark, error);
     return 0;
@@ -1419,13 +1444,23 @@ async function processQueue(taskId, taskData) {
           });
           
           videoDuration = ffprobeResult.format?.duration;
+          
+          // ตรวจสอบและแปลงค่า duration ให้ถูกต้อง
           if (videoDuration) {
-            console.log(`📹 WebM video duration: ${videoDuration}s`);
+            videoDuration = parseFloat(videoDuration);
+            if (isNaN(videoDuration) || videoDuration <= 0) {
+              console.log('⚠️  Invalid duration from ffprobe, will use fallback estimation');
+              videoDuration = null;
+            } else {
+              console.log(`📹 WebM video duration: ${videoDuration}s`);
+            }
           } else {
             console.log('⚠️  Could not determine WebM duration from ffprobe');
+            videoDuration = null;
           }
         } catch (ffprobeError) {
           console.warn('ffprobe failed for WebM file:', ffprobeError.message);
+          videoDuration = null; // ตั้งค่าเป็น null เพื่อใช้ fallback
         }
       }
     } catch (statError) {
@@ -1470,17 +1505,40 @@ async function processQueue(taskId, taskData) {
           if (percent === 0 && progress.timemark) {
             const timemarkSeconds = convertTimemarkToSeconds(progress.timemark);
             if (timemarkSeconds > 0) {
-              // ใช้ความยาวจริงจาก ffprobe หรือประมาณ
-              const estimatedDuration = videoDuration || 30; // ใช้ duration จริงหรือประมาณ 30 วินาที
-              percent = Math.min(Math.round((timemarkSeconds / estimatedDuration) * 100), 95);
-              console.log(`📊 WebM estimated progress: ${percent}% (${timemarkSeconds.toFixed(1)}s/${estimatedDuration}s)`);
+              // ใช้ความยาวจริงจาก ffprobe หรือประมาณ 30 วินาที
+              const estimatedDuration = (videoDuration && videoDuration > 0) ? videoDuration : 30;
+              
+              // ตรวจสอบให้แน่ใจว่าไม่เกิด NaN
+              if (estimatedDuration > 0) {
+                percent = Math.min(Math.round((timemarkSeconds / estimatedDuration) * 100), 95);
+                console.log(`📊 WebM estimated progress: ${percent}% (${timemarkSeconds.toFixed(1)}s/${estimatedDuration}s)`);
+              } else {
+                // fallback ถ้ายังมีปัญหา
+                percent = Math.min(Math.round(timemarkSeconds * 10), 95); // ประมาณ 10% per second
+                console.log(`📊 WebM fallback progress: ${percent}% (${timemarkSeconds.toFixed(1)}s)`);
+              }
             }
           }
         }
         
+        // ตรวจสอบให้แน่ใจว่า percent ไม่เป็น NaN หรือ null
+        if (isNaN(percent) || percent === null || percent === undefined) {
+          console.warn(`Invalid percent value: ${percent}, using fallback 0`);
+          percent = 0;
+        }
+        
+        // ตรวจสอบให้อยู่ในช่วง 0-100
+        percent = Math.max(0, Math.min(100, percent));
+        
         console.log(`Processing progress for task ${taskId}: ${percent}%`);
-        await Task.updateOne({ taskId }, { status: 'processing', percent });
-        await safeUpdateTranscode(taskData.storage, taskData.quality, percent);
+        
+        try {
+          await Task.updateOne({ taskId }, { status: 'processing', percent });
+          await safeUpdateTranscode(taskData.storage, taskData.quality, percent);
+        } catch (updateError) {
+          console.error(`Error updating progress for task ${taskId}:`, updateError);
+          // Don't throw, just log the error to prevent crashing
+        }
       })
       .on('end', async () => {
         try {
