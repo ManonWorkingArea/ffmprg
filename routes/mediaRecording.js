@@ -14,23 +14,90 @@ const upload = multer({
   }
 });
 
-// Base directories for media recording storage
-const MEDIA_BASE_DIR = path.join(process.cwd(), 'uploads', 'media-recording');
-const SESSIONS_DIR = path.join(MEDIA_BASE_DIR, 'sessions');
+// Base directories for media recording storage - use absolute path to ensure consistency
+const MEDIA_BASE_DIR = path.resolve(process.cwd(), 'uploads', 'media-recording');
+const SESSIONS_DIR = path.resolve(MEDIA_BASE_DIR, 'sessions');
 
-// Ensure base directories exist
+// Ensure base directories exist with proper error handling and permission checks
 const initializeDirectories = async () => {
   try {
-    await fs.mkdir(MEDIA_BASE_DIR, { recursive: true });
-    await fs.mkdir(SESSIONS_DIR, { recursive: true });
-    console.log('📁 Media recording directories initialized');
+    // Check if we can write to the working directory first
+    console.log(`🔍 Checking write permissions for: ${process.cwd()}`);
+    
+    // Create uploads directory first
+    const uploadsDir = path.resolve(process.cwd(), 'uploads');
+    await fs.mkdir(uploadsDir, { recursive: true, mode: 0o755 });
+    console.log(`📁 Created/verified uploads directory: ${uploadsDir}`);
+    
+    // Create media-recording directory
+    await fs.mkdir(MEDIA_BASE_DIR, { recursive: true, mode: 0o755 });
+    console.log(`📁 Created/verified media-recording directory: ${MEDIA_BASE_DIR}`);
+    
+    // Create sessions directory
+    await fs.mkdir(SESSIONS_DIR, { recursive: true, mode: 0o755 });
+    console.log(`📁 Created/verified sessions directory: ${SESSIONS_DIR}`);
+    
+    // Verify directories were created and are accessible
+    try {
+      await fs.access(SESSIONS_DIR, fs.constants.R_OK | fs.constants.W_OK);
+      console.log('✅ Media recording directories initialized successfully');
+      console.log(`📍 Working directory: ${process.cwd()}`);
+      console.log(`📍 Sessions directory: ${SESSIONS_DIR}`);
+    } catch (accessError) {
+      console.error('❌ Directory access verification failed:', accessError);
+      throw accessError;
+    }
+    
   } catch (error) {
-    console.error('❌ Error creating base directories:', error);
+    console.error('❌ CRITICAL ERROR: Cannot create media recording directories:', error);
+    console.error(`📍 Current working directory: ${process.cwd()}`);
+    console.error(`📍 Process user: ${process.getuid ? process.getuid() : 'N/A'}`);
+    console.error('💡 Please ensure the Node.js process has write permissions to create directories');
+    
+    // Try alternative directory in /tmp as fallback
+    try {
+      console.log('🔄 Attempting fallback to temporary directory...');
+      const fallbackDir = path.join('/tmp', 'ffmprg-media-recording', 'sessions');
+      await fs.mkdir(fallbackDir, { recursive: true, mode: 0o755 });
+      console.log(`⚠️  Using fallback directory: ${fallbackDir}`);
+      console.log('⚠️  WARNING: Files will be stored in /tmp and may be lost on server restart');
+      
+      // Update the constants to use fallback
+      // Note: This is a runtime change and won't persist
+      Object.defineProperty(global, 'MEDIA_FALLBACK_DIR', { value: fallbackDir });
+      
+    } catch (fallbackError) {
+      console.error('❌ Fallback directory creation also failed:', fallbackError);
+      throw new Error(`Cannot create media recording directories. Original error: ${error.message}, Fallback error: ${fallbackError.message}`);
+    }
+  }
+};
+
+// Initialize on startup with retry mechanism
+const initializeWithRetry = async (maxRetries = 3, delay = 1000) => {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      await initializeDirectories();
+      return; // Success, exit retry loop
+    } catch (error) {
+      console.error(`❌ Directory initialization attempt ${attempt}/${maxRetries} failed:`, error.message);
+      
+      if (attempt === maxRetries) {
+        console.error('❌ All directory initialization attempts failed');
+        console.error('💡 Media recording features may not work properly');
+        console.error('💡 Please check server permissions and file system access');
+        // Don't throw error to prevent server startup failure
+        return;
+      }
+      
+      // Wait before retry
+      await new Promise(resolve => setTimeout(resolve, delay * attempt));
+    }
   }
 };
 
 // Initialize on startup
-initializeDirectories();
+initializeWithRetry();
 
 // In-memory storage for session data (in production, use Redis or database)
 const sessions = new Map();
@@ -54,107 +121,227 @@ const logRequest = (endpoint, data, status = 'success') => {
     typeof data === 'object' ? JSON.stringify(data, null, 2) : data);
 };
 
-// Create session directory and JSON file
+// Create session directory and JSON file with enhanced error handling
 const createSessionDirectory = async (sessionId) => {
   try {
-    const sessionDir = path.join(SESSIONS_DIR, sessionId);
+    // Check if we're using fallback directory
+    const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
+    const sessionDir = path.join(sessionsDir, sessionId);
     const chunksDir = path.join(sessionDir, 'chunks');
     
     console.log(`📁 Creating session directory: ${sessionDir}`);
-    await fs.mkdir(sessionDir, { recursive: true });
+    
+    // Create session directory with explicit permissions
+    try {
+      await fs.mkdir(sessionDir, { recursive: true, mode: 0o755 });
+      console.log(`✅ Session directory created: ${sessionDir}`);
+    } catch (sessionDirError) {
+      console.error(`❌ Failed to create session directory: ${sessionDirError.message}`);
+      
+      // Try to check if directory already exists
+      try {
+        await fs.access(sessionDir, fs.constants.R_OK | fs.constants.W_OK);
+        console.log(`📁 Session directory already exists and is accessible: ${sessionDir}`);
+      } catch (accessError) {
+        throw new Error(`Cannot create or access session directory: ${sessionDirError.message}`);
+      }
+    }
     
     console.log(`📁 Creating chunks directory: ${chunksDir}`);
-    await fs.mkdir(chunksDir, { recursive: true });
     
-    // Verify directories were created
+    // Create chunks directory with explicit permissions
     try {
-      await fs.access(sessionDir);
-      await fs.access(chunksDir);
-      console.log(`✅ Session directories created successfully: ${sessionDir}`);
+      await fs.mkdir(chunksDir, { recursive: true, mode: 0o755 });
+      console.log(`✅ Chunks directory created: ${chunksDir}`);
+    } catch (chunksDirError) {
+      console.error(`❌ Failed to create chunks directory: ${chunksDirError.message}`);
+      
+      // Try to check if directory already exists
+      try {
+        await fs.access(chunksDir, fs.constants.R_OK | fs.constants.W_OK);
+        console.log(`📁 Chunks directory already exists and is accessible: ${chunksDir}`);
+      } catch (accessError) {
+        throw new Error(`Cannot create or access chunks directory: ${chunksDirError.message}`);
+      }
+    }
+    
+    // Verify directories were created and are accessible
+    try {
+      await fs.access(sessionDir, fs.constants.R_OK | fs.constants.W_OK);
+      await fs.access(chunksDir, fs.constants.R_OK | fs.constants.W_OK);
+      console.log(`✅ Session directories created and verified: ${sessionDir}`);
     } catch (verifyError) {
       console.error(`❌ Failed to verify session directories:`, verifyError);
-      throw verifyError;
+      throw new Error(`Session directories created but not accessible: ${verifyError.message}`);
     }
     
     return { sessionDir, chunksDir };
   } catch (error) {
     console.error(`❌ Error creating session directory for ${sessionId}:`, error);
+    console.error(`📍 Current working directory: ${process.cwd()}`);
+    console.error(`📍 Target sessions directory: ${global.MEDIA_FALLBACK_DIR || SESSIONS_DIR}`);
     throw error;
   }
 };
 
-// Save session metadata to JSON file
+// Save session metadata to JSON file with enhanced error handling and permission checks
 const saveSessionMetadata = async (sessionId, sessionData) => {
   try {
-    const sessionDir = path.join(SESSIONS_DIR, sessionId);
+    // Use fallback directory if available
+    const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
+    const sessionDir = path.join(sessionsDir, sessionId);
     const metadataPath = path.join(sessionDir, 'session.json');
     
     console.log(`💾 Saving session metadata to: ${metadataPath}`);
     
-    // Ensure directory exists
-    await fs.mkdir(sessionDir, { recursive: true });
-    
-    // Save the file
-    await fs.writeFile(metadataPath, JSON.stringify(sessionData, null, 2), 'utf8');
-    console.log(`✅ Session metadata saved successfully: ${metadataPath}`);
-    
-    // Verify the file was created
+    // Ensure directory exists with proper permissions
     try {
-      await fs.access(metadataPath);
+      await fs.mkdir(sessionDir, { recursive: true, mode: 0o755 });
+    } catch (mkdirError) {
+      // Check if directory exists and is accessible
+      try {
+        await fs.access(sessionDir, fs.constants.R_OK | fs.constants.W_OK);
+        console.log(`📁 Session directory already exists: ${sessionDir}`);
+      } catch (accessError) {
+        console.error(`❌ Cannot create or access session directory: ${mkdirError.message}`);
+        throw new Error(`Directory creation failed: ${mkdirError.message}`);
+      }
+    }
+    
+    // Save the file with proper permissions
+    try {
+      await fs.writeFile(metadataPath, JSON.stringify(sessionData, null, 2), { 
+        encoding: 'utf8',
+        mode: 0o644 
+      });
+      console.log(`✅ Session metadata saved successfully: ${metadataPath}`);
+    } catch (writeError) {
+      console.error(`❌ Failed to write session metadata: ${writeError.message}`);
+      
+      // Check if we can write to the directory
+      try {
+        await fs.access(sessionDir, fs.constants.W_OK);
+        console.error(`❌ Directory is writable, but file write failed`);
+      } catch (dirAccessError) {
+        console.error(`❌ Directory is not writable: ${dirAccessError.message}`);
+      }
+      
+      throw new Error(`Cannot write session metadata: ${writeError.message}`);
+    }
+    
+    // Verify the file was created and is readable
+    try {
+      await fs.access(metadataPath, fs.constants.R_OK);
       const stats = await fs.stat(metadataPath);
       console.log(`📊 Session file size: ${stats.size} bytes`);
     } catch (verifyError) {
       console.error(`❌ Failed to verify session file: ${metadataPath}`, verifyError);
+      throw new Error(`Session file created but not accessible: ${verifyError.message}`);
     }
     
     return metadataPath;
   } catch (error) {
     console.error(`❌ Error saving session metadata for ${sessionId}:`, error);
+    console.error(`📍 Current working directory: ${process.cwd()}`);
+    console.error(`📍 Target directory: ${global.MEDIA_FALLBACK_DIR || SESSIONS_DIR}`);
+    console.error(`📍 Process UID: ${process.getuid ? process.getuid() : 'N/A'}`);
+    console.error(`📍 Process GID: ${process.getgid ? process.getgid() : 'N/A'}`);
     throw error;
   }
 };
 
-// Load session metadata from JSON file
+// Load session metadata from JSON file with enhanced error handling
 const loadSessionMetadata = async (sessionId) => {
   try {
-    const sessionDir = path.join(SESSIONS_DIR, sessionId);
+    // Use fallback directory if available
+    const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
+    const sessionDir = path.join(sessionsDir, sessionId);
     const metadataPath = path.join(sessionDir, 'session.json');
     
     // Check if file exists first
     try {
-      await fs.access(metadataPath);
+      await fs.access(metadataPath, fs.constants.R_OK);
     } catch (accessError) {
       console.error(`❌ Session metadata file not found: ${metadataPath}`);
+      
+      // Additional debugging information
+      try {
+        await fs.access(sessionDir, fs.constants.R_OK);
+        console.log(`📁 Session directory exists but metadata file is missing: ${sessionDir}`);
+        
+        // List directory contents for debugging
+        const files = await fs.readdir(sessionDir);
+        console.log(`📂 Directory contents: ${files.join(', ')}`);
+      } catch (dirAccessError) {
+        console.error(`❌ Session directory not accessible: ${sessionDir}`);
+      }
+      
       return null;
     }
     
-    const data = await fs.readFile(metadataPath, 'utf8');
-    return JSON.parse(data);
+    try {
+      const data = await fs.readFile(metadataPath, 'utf8');
+      return JSON.parse(data);
+    } catch (readError) {
+      console.error(`❌ Error reading session metadata file: ${metadataPath}`, readError);
+      return null;
+    }
+    
   } catch (error) {
     console.error(`❌ Error loading session metadata for ${sessionId}:`, error);
     return null;
   }
 };
 
-// Save chunk file and update session metadata
+// Save chunk file and update session metadata with enhanced error handling
 const saveChunk = async (sessionId, chunkIndex, chunkFile, metadata) => {
   try {
-    const sessionDir = path.join(SESSIONS_DIR, sessionId);
+    // Use fallback directory if available
+    const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
+    const sessionDir = path.join(sessionsDir, sessionId);
     const chunksDir = path.join(sessionDir, 'chunks');
     
     // Generate chunk filename (convert to .webm as requested)
     const chunkFilename = `chunk_${chunkIndex.toString().padStart(4, '0')}.webm`;
     const chunkPath = path.join(chunksDir, chunkFilename);
     
+    console.log(`💾 Saving chunk ${chunkIndex} to: ${chunkPath}`);
+    
+    // Ensure chunks directory exists
+    try {
+      await fs.mkdir(chunksDir, { recursive: true, mode: 0o755 });
+    } catch (mkdirError) {
+      try {
+        await fs.access(chunksDir, fs.constants.W_OK);
+        console.log(`📁 Chunks directory already exists: ${chunksDir}`);
+      } catch (accessError) {
+        console.error(`❌ Cannot create or access chunks directory: ${mkdirError.message}`);
+        throw new Error(`Chunks directory creation failed: ${mkdirError.message}`);
+      }
+    }
+    
     // Move uploaded chunk to session directory
-    await fs.copyFile(chunkFile.path, chunkPath);
+    try {
+      await fs.copyFile(chunkFile.path, chunkPath);
+      console.log(`✅ Chunk copied successfully: ${chunkPath}`);
+    } catch (copyError) {
+      console.error(`❌ Failed to copy chunk file: ${copyError.message}`);
+      throw new Error(`Cannot copy chunk file: ${copyError.message}`);
+    }
     
     // Clean up temporary file
-    await fs.unlink(chunkFile.path);
+    try {
+      await fs.unlink(chunkFile.path);
+      console.log(`🗑️ Temporary chunk file cleaned up: ${chunkFile.path}`);
+    } catch (unlinkError) {
+      console.warn(`⚠️  Failed to clean up temporary file: ${unlinkError.message}`);
+      // Don't throw error for cleanup failure
+    }
     
     // Load current session metadata
     let sessionData = await loadSessionMetadata(sessionId);
     if (!sessionData) {
+      console.error(`❌ Session metadata not found for chunk save: ${sessionId}`);
       throw new Error(`Session metadata not found for ${sessionId}`);
     }
     
@@ -199,6 +386,12 @@ const saveChunk = async (sessionId, chunkIndex, chunkFile, metadata) => {
     
   } catch (error) {
     console.error(`❌ Error saving chunk ${chunkIndex} for session ${sessionId}:`, error);
+    
+    // Log additional debugging information
+    console.error(`📍 Working directory: ${process.cwd()}`);
+    console.error(`📍 Sessions directory: ${global.MEDIA_FALLBACK_DIR || SESSIONS_DIR}`);
+    console.error(`📍 Temporary chunk file: ${chunkFile.path}`);
+    
     throw error;
   }
 };
