@@ -378,15 +378,54 @@ const performanceMonitor = (req, res, next) => {
 };
 
 /**
- * CORS middleware for media recording endpoints
+ * Enhanced CORS middleware for media recording endpoints
  */
 const corsHandler = (req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  const origin = req.headers.origin;
   
+  // List of allowed origins
+  const allowedOrigins = [
+    'http://localhost:3000',
+    'http://localhost:8080', 
+    'http://localhost:8081',
+    'https://media.cloudrestfulapi.com',
+    'https://cloudrestfulapi.com',
+    'http://159.65.131.165:3000'
+  ];
+  
+  // Check if origin is allowed
+  let corsOrigin = '*';
+  if (origin) {
+    if (allowedOrigins.includes(origin) || 
+        origin.match(/^https?:\/\/.*\.cloudrestfulapi\.com$/) ||
+        origin.match(/^https?:\/\/localhost(:\d+)?$/)) {
+      corsOrigin = origin;
+    }
+  }
+  
+  // Set CORS headers
+  res.header('Access-Control-Allow-Origin', corsOrigin);
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+  res.header('Access-Control-Allow-Headers', [
+    'Origin',
+    'X-Requested-With', 
+    'Content-Type',
+    'Accept',
+    'Authorization',
+    'Cache-Control',
+    'X-Session-ID',
+    'X-Chunk-Index'
+  ].join(', '));
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Max-Age', '86400'); // 24 hours
+  
+  // Log CORS request for debugging
+  console.log(`🌐 CORS: ${req.method} ${req.originalUrl} from origin: ${origin || 'none'} → allowed: ${corsOrigin}`);
+  
+  // Handle preflight requests
   if (req.method === 'OPTIONS') {
-    res.sendStatus(200);
+    console.log('✈️  Preflight request handled');
+    return res.status(200).end();
   } else {
     next();
   }

@@ -94,7 +94,54 @@ const CLOUDFLARE_API_BASE = 'https://api.cloudflare.com/client/v4';
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.use(cors());
+// Enhanced CORS configuration for media recording system
+const corsOptions = {
+  origin: [
+    'http://localhost:3000',
+    'http://localhost:8080', 
+    'http://localhost:8081',
+    'https://media.cloudrestfulapi.com',
+    'https://cloudrestfulapi.com',
+    /^https?:\/\/.*\.cloudrestfulapi\.com$/,
+    /^https?:\/\/localhost(:\d+)?$/,
+    /^http:\/\/159\.65\.131\.165(:\d+)?$/
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: [
+    'Origin',
+    'X-Requested-With', 
+    'Content-Type',
+    'Accept',
+    'Authorization',
+    'Cache-Control',
+    'X-Session-ID',
+    'X-Chunk-Index'
+  ],
+  credentials: true,
+  maxAge: 86400, // 24 hours preflight cache
+  optionsSuccessStatus: 200
+};
+
+app.use(cors(corsOptions));
+
+// Additional CORS headers for media recording endpoints
+app.use('/api/media', (req, res, next) => {
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+    res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Origin,X-Requested-With,Content-Type,Accept,Authorization,Cache-Control,X-Session-ID,X-Chunk-Index');
+    res.header('Access-Control-Allow-Credentials', 'true');
+    res.header('Access-Control-Max-Age', '86400');
+    return res.status(200).end();
+  }
+  
+  // Set CORS headers for all requests
+  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  next();
+});
+
 app.use(express.json({ limit: '50mb' })); // เพิ่ม limit สำหรับ JSON
 app.use(express.urlencoded({ limit: '50mb', extended: true })); // เพิ่ม limit สำหรับ URL encoded
 app.use(express.static('public'));
@@ -111,6 +158,36 @@ app.use('/api/media', requestLogger);
 app.use('/api/media', performanceMonitor);
 app.use('/api/media', mediaRecordingRoutes);
 console.log('✅ Media recording routes registered successfully');
+
+// CORS test endpoint
+app.get('/api/cors-test', (req, res) => {
+  res.json({
+    success: true,
+    message: 'CORS test successful',
+    origin: req.headers.origin || 'none',
+    timestamp: new Date().toISOString(),
+    headers: {
+      'access-control-allow-origin': res.get('Access-Control-Allow-Origin'),
+      'access-control-allow-credentials': res.get('Access-Control-Allow-Credentials')
+    }
+  });
+});
+
+// Media recording CORS test endpoint
+app.options('/api/media/*', (req, res) => {
+  console.log('🧪 CORS preflight test for:', req.originalUrl, 'from:', req.headers.origin);
+  res.status(200).end();
+});
+
+app.get('/api/media/cors-test', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Media recording CORS test successful',
+    origin: req.headers.origin || 'none',
+    timestamp: new Date().toISOString(),
+    endpoint: '/api/media/cors-test'
+  });
+});
 
 // ปรับปรุงการตั้งค่า multer สำหรับไฟล์ใหญ่
 const upload = multer({ 
