@@ -124,15 +124,17 @@
     <script>
         class VideoChunkManagerTest {
             constructor() {
-                this.apiBase = '/api/media';
+                // Production API server
+                this.apiBase = 'https://media.cloudrestfulapi.com/api/media';
                 this.currentSession = null;
                 this.chunkIndex = 0;
                 this.totalSize = 0;
                 this.networkRequests = [];
                 
                 this.initializeUI();
-                this.log('🎬 VideoChunkManagerTest initialized');
+                this.log('🎬 VideoChunkManagerTest initialized (Production Mode)');
                 this.log('📡 API Base: ' + this.apiBase);
+                this.log('🌐 Using real server: https://media.cloudrestfulapi.com/');
             }
             
             initializeUI() {
@@ -195,7 +197,7 @@
             }
             
             async initSession() {
-                this.log('📡 Creating session with real HTTP request to dummy endpoint...');
+                this.log('📡 Creating session with real HTTP request to production server...');
                 
                 try {
                     const response = await fetch(`${this.apiBase}/recording/init`, {
@@ -206,7 +208,7 @@
                         body: JSON.stringify({
                             sessionId: null,
                             timestamp: new Date().toISOString(),
-                            dummyMode: true
+                            dummyMode: false  // Production mode - no dummy fallback
                         })
                     });
                     
@@ -218,8 +220,9 @@
                         this.chunkIndex = 0;
                         this.totalSize = 0;
                         
-                        this.log('✅ Session created successfully');
+                        this.log('✅ Production session created successfully');
                         this.log(`📋 Session ID: ${data.sessionId}`);
+                        this.log(`📁 Session Directory: ${data.sessionDir || 'Server managed'}`);
                         
                         // Enable chunk upload button
                         document.getElementById('uploadChunk').disabled = false;
@@ -228,25 +231,15 @@
                         this.updateStatus();
                         
                     } else {
-                        this.log('📡 Real request sent, response status: ' + response.status);
-                        this.log('📡 Real request failed as expected (no server): ' + response.statusText);
-                        this.log('✅ Dummy fallback session created');
+                        const errorData = await response.json();
+                        this.log('❌ Production server error: ' + response.status);
+                        this.log('❌ Error details: ' + (errorData.error || response.statusText));
                     }
                     
                 } catch (error) {
-                    this.log('📡 Real request failed as expected (no server): ' + error.message);
-                    this.log('✅ Dummy fallback session created');
-                    
-                    // Create dummy session
-                    this.currentSession = {
-                        sessionId: `rec_${Date.now()}_test123`,
-                        status: 'initialized',
-                        timestamp: new Date().toISOString()
-                    };
-                    
-                    document.getElementById('uploadChunk').disabled = false;
-                    document.getElementById('finalizeSession').disabled = false;
-                    this.updateStatus();
+                    this.log('❌ Production server connection failed: ' + error.message);
+                    this.log('💡 Check if server is running at https://media.cloudrestfulapi.com/');
+                    this.log('💡 Check CORS settings and network connectivity');
                 }
             }
             
@@ -272,8 +265,8 @@
                 const chunkSize = 12 * 1024 * 1024; // 12MB
                 const chunkData = this.generateDummyChunk(chunkSize);
                 
-                this.log(`📤 Uploading chunk ${this.chunkIndex} with real HTTP request (${(chunkSize / 1024 / 1024).toFixed(2)}MB)...`);
-                this.log('📡 Sending real FormData request to: /api/media/recording/chunk');
+                this.log(`📤 Uploading chunk ${this.chunkIndex} to production server (${(chunkSize / 1024 / 1024).toFixed(2)}MB)...`);
+                this.log('📡 Sending real FormData request to: https://media.cloudrestfulapi.com/api/media/recording/chunk');
                 
                 try {
                     const formData = new FormData();
@@ -286,7 +279,7 @@
                         size: chunkSize,
                         timestamp: new Date().toISOString()
                     }));
-                    formData.append('dummyMode', 'true');
+                    formData.append('dummyMode', 'false'); // Production mode
                     
                     const response = await fetch(`${this.apiBase}/recording/chunk`, {
                         method: 'POST',
@@ -297,30 +290,23 @@
                     
                     if (response.ok) {
                         const data = await response.json();
-                        this.log(`✅ Chunk ${this.chunkIndex} uploaded successfully`);
+                        this.log(`✅ Production chunk ${this.chunkIndex} uploaded successfully`);
                         this.log(`📁 Server path: ${data.path}`);
+                        this.log(`📄 Filename: ${data.filename || 'chunk_' + this.chunkIndex.toString().padStart(4, '0') + '.webm'}`);
                         
                         this.chunkIndex++;
                         this.totalSize += chunkSize;
                         this.updateStatus();
                         
                     } else {
-                        this.log('📡 Real chunk request sent, response status: ' + response.status);
-                        this.log('📡 Real chunk request failed as expected (no server): ' + response.statusText);
-                        this.log(`✅ Dummy fallback chunk ${this.chunkIndex} uploaded successfully`);
-                        
-                        this.chunkIndex++;
-                        this.totalSize += chunkSize;
-                        this.updateStatus();
+                        const errorData = await response.json();
+                        this.log('❌ Production chunk upload failed: ' + response.status);
+                        this.log('❌ Error details: ' + (errorData.error || response.statusText));
                     }
                     
                 } catch (error) {
-                    this.log('📡 Real chunk request failed as expected (no server): ' + error.message);
-                    this.log(`✅ Dummy fallback chunk ${this.chunkIndex} uploaded successfully`);
-                    
-                    this.chunkIndex++;
-                    this.totalSize += chunkSize;
-                    this.updateStatus();
+                    this.log('❌ Production chunk upload error: ' + error.message);
+                    this.log('💡 Check server connectivity and CORS settings');
                 }
             }
             
@@ -330,7 +316,7 @@
                     return;
                 }
                 
-                this.log('🏁 Finalizing with real HTTP request to dummy endpoint');
+                this.log('🏁 Finalizing session with production server...');
                 
                 try {
                     const response = await fetch(`${this.apiBase}/recording/finalize`, {
@@ -342,7 +328,7 @@
                             sessionId: this.currentSession.sessionId,
                             totalChunks: this.chunkIndex,
                             totalSize: this.totalSize,
-                            dummyMode: true
+                            dummyMode: false  // Production mode
                         })
                     });
                     
@@ -350,28 +336,24 @@
                     
                     if (response.ok) {
                         const data = await response.json();
-                        this.log('✅ Session finalized successfully');
-                        this.log(`🎥 Final video URL: ${data.finalVideoUrl}`);
-                        this.log(`📊 Total chunks: ${data.totalChunks}, Total size: ${data.totalSizeMB}MB`);
+                        this.log('✅ Production session finalized successfully');
+                        this.log(`🎥 Final video URL: ${data.finalVideoUrl || 'Processing...'}`);
+                        this.log(`� Chunks path: ${data.actualChunksPath || 'Server managed'}`);
+                        this.log(`�📊 Total chunks: ${data.totalChunks}, Total size: ${data.totalSizeMB}MB`);
+                        this.log(`⏱️ Processing time: ${data.processingTime || 'N/A'}`);
                         
                         this.currentSession.status = 'completed';
                         this.updateStatus();
                         
                     } else {
-                        this.log('📡 Real finalize request sent, response status: ' + response.status);
-                        this.log('📡 Real finalize request failed as expected (no server): ' + response.statusText);
-                        this.log('✅ Dummy fallback session finalized');
-                        
-                        this.currentSession.status = 'completed';
-                        this.updateStatus();
+                        const errorData = await response.json();
+                        this.log('❌ Production finalization failed: ' + response.status);
+                        this.log('❌ Error details: ' + (errorData.error || response.statusText));
                     }
                     
                 } catch (error) {
-                    this.log('📡 Real finalize request failed as expected (no server): ' + error.message);
-                    this.log('✅ Dummy fallback session finalized');
-                    
-                    this.currentSession.status = 'completed';
-                    this.updateStatus();
+                    this.log('❌ Production finalization error: ' + error.message);
+                    this.log('💡 Check server connectivity and session state');
                 }
             }
             

@@ -11,27 +11,38 @@ const fs = require('fs');
 const path = require('path');
 
 class MediaRecordingTester {
-  constructor(baseUrl = 'http://localhost:3000') {
+  constructor(baseUrl = 'https://media.cloudrestfulapi.com') {
     this.baseUrl = baseUrl;
     this.apiBase = `${baseUrl}/api/media`;
     this.currentSession = null;
     this.chunks = [];
     
-    console.log('🧪 Media Recording Tester initialized');
+    console.log('🧪 Media Recording Tester initialized (Production Mode)');
     console.log(`📡 API Base URL: ${this.apiBase}`);
+    console.log('🌐 Using production server: https://media.cloudrestfulapi.com/');
   }
   
   /**
-   * Test 1: Session Creation
+   * Test 1: Session Creation with Production Server
    */
   async testSessionCreation() {
     console.log('\n=== TEST 1: Session Creation ===');
     
     try {
       const response = await axios.post(`${this.apiBase}/recording/init`, {
-        sessionId: null, // Let server generate
-        timestamp: new Date().toISOString(),
-        dummyMode: true
+        recordingMetadata: {
+          resolution: '4K',
+          framerate: '60fps',
+          format: 'webm',
+          chunkDuration: 5,
+          expectedDuration: 30
+        }
+      }, {
+        timeout: 10000,
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'MediaRecordingTester/1.0'
+        }
       });
       
       console.log('✅ Session creation test passed');
@@ -41,17 +52,23 @@ class MediaRecordingTester {
       return true;
       
     } catch (error) {
-      console.log('📡 Real request failed as expected:', error.message);
-      console.log('✅ This is the expected behavior (no server)');
+      if (error.code === 'ECONNREFUSED' || error.response?.status === 404) {
+        console.log('⚠️  Production server not available. This is expected during development.');
+        console.log('✅ Creating mock session for testing...');
+        
+        // Create mock session for testing
+        this.currentSession = {
+          sessionId: `rec_${Date.now()}_test123`,
+          status: 'initialized',
+          timestamp: new Date().toISOString(),
+          mock: true
+        };
+        
+        return true;
+      }
       
-      // Create dummy session for testing
-      this.currentSession = {
-        sessionId: `rec_${Date.now()}_test123`,
-        status: 'initialized',
-        timestamp: new Date().toISOString()
-      };
-      
-      return true;
+      console.log('❌ Session creation test failed:', error.message);
+      return false;
     }
   }
   
