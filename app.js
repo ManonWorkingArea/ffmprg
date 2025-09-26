@@ -111,11 +111,10 @@ app.use(express.static('outputs'));
 
 // Import and use media recording routes
 const mediaRecordingRoutes = require('./routes/mediaRecording');
-const { requestLogger, performanceMonitor, corsHandler } = require('./middleware/mediaRecording');
+const { requestLogger, performanceMonitor } = require('./middleware/mediaRecording');
 
 // Apply media recording middleware and routes
 console.log('📡 Registering media recording routes at /api/media');
-app.use('/api/media', corsHandler);
 app.use('/api/media', requestLogger);
 app.use('/api/media', performanceMonitor);
 app.use('/api/media', mediaRecordingRoutes);
