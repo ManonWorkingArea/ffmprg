@@ -1034,7 +1034,13 @@ The merge will proceed with available chunks but may result in a very short vide
     // Check if all files are MP4 - if so, use fast concat method
     const allMP4 = chunkFiles.every(chunk => chunk.format === 'mp4');
     
-    console.log(`📊 Video Analysis Summary:`);
+    // Debug: Show format for each chunk
+    console.log(`� Chunk format analysis:`);
+    chunkFiles.forEach((chunk, index) => {
+      console.log(`   Chunk ${index}: ${chunk.format || 'unknown'} (${chunk.filename})`);
+    });
+    
+    console.log(`�📊 Video Analysis Summary:`);
     console.log(`   Valid chunks: ${chunkFiles.length}/${sessionData.chunks.length}`);
     console.log(`   Expected duration: ${totalExpectedDuration.toFixed(2)}s`);
     console.log(`   Total size: ${(chunkFiles.reduce((sum, f) => sum + f.size, 0) / 1024 / 1024).toFixed(2)}MB`);
@@ -1043,7 +1049,7 @@ The merge will proceed with available chunks but may result in a very short vide
     
     // Use fast MP4 concat if all files are MP4 and no timestamp issues
     if (allMP4 && !hasTimestampIssues) {
-      console.log(`🚀 Using FAST MP4 concat mode (no re-encoding)...`);
+      console.log(`🚀 Using LIGHTNING FAST MP4 concat mode (binary concatenation)...`);
       try {
         return await fastMP4Concat(chunkFiles, outputPath, totalExpectedDuration);
       } catch (fastConcatError) {
@@ -1051,6 +1057,19 @@ The merge will proceed with available chunks but may result in a very short vide
         console.log(`🔄 Falling back to standard merge method...`);
         // Continue to standard method below
       }
+    } 
+    // Force fast mode if file extension suggests MP4 (even if format detection failed)
+    else if (chunkFiles.every(chunk => chunk.filename.toLowerCase().endsWith('.mp4'))) {
+      console.log(`🔧 FORCING fast mode (all files have .mp4 extension)...`);
+      try {
+        return await fastMP4Concat(chunkFiles, outputPath, totalExpectedDuration);
+      } catch (fastConcatError) {
+        console.error(`❌ Forced fast concat failed: ${fastConcatError.message}`);
+        console.log(`🔄 Falling back to standard merge method...`);
+        // Continue to standard method below
+      }
+    } else {
+      console.log(`⚠️  Fast mode disabled - Reason: ${!allMP4 ? 'Mixed formats detected' : 'Timestamp issues detected'}`);
     }
     
     // Use optimized FFmpeg strategy for mixed formats or timestamp issues
