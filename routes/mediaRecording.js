@@ -1190,6 +1190,121 @@ router.get('/session/:sessionId/video', async (req, res) => {
 });
 
 /**
+ * Validate chunk file integrity
+ */
+async function validateChunkFile(chunkPath) {
+  try {
+    // Check file exists and get stats
+    const stats = await fs.stat(chunkPath);
+    
+    if (stats.size === 0) {
+      return { valid: false, reason: 'File is empty' };
+    }
+    
+    if (stats.size < 100) {
+      return { valid: false, reason: `File too small (${stats.size} bytes)` };
+    }
+    
+    // Read file header for format validation
+    const buffer = Buffer.alloc(128); // Read more bytes for better detection
+    const fileHandle = await fs.open(chunkPath, 'r');
+    
+    try {
+      const { bytesRead } = await fileHandle.read(buffer, 0, 128, 0);
+      
+      if (bytesRead < 32) {
+        return { valid: false, reason: 'Cannot read file header' };
+      }
+      
+      // WebM validation - look for EBML header
+      const ebmlSignature = Buffer.from([0x1A, 0x45, 0xDF, 0xA3]);
+      const hasEBML = buffer.indexOf(ebmlSignature) !== -1;
+      
+      // Also check for 'webm' string in the file
+      const hasWebMString = buffer.toString('ascii').toLowerCase().includes('webm');
+      
+      // Alternative: Check for Matroska signatures (WebM is based on Matroska)
+      const matroskaSignature = Buffer.from([0x42, 0x86]); // DocType element
+      const hasMatroska = buffer.indexOf(matroskaSignature) !== -1;
+      
+      if (hasEBML || hasWebMString || hasMatroska) {
+        // Additional validation with FFprobe
+        try {
+          const ffprobe = require('fluent-ffmpeg').ffprobe;
+          const metadata = await new Promise((resolve, reject) => {
+            ffprobe(chunkPath, (err, data) => {
+              if (err) reject(err);
+              else resolve(data);
+            });
+          });
+          
+          if (!metadata.format || !metadata.streams || metadata.streams.length === 0) {
+            return { valid: false, reason: 'No valid streams found by FFprobe' };
+          }
+          
+          const videoStream = metadata.streams.find(s => s.codec_type === 'video');
+          if (!videoStream) {
+            return { valid: false, reason: 'No video stream found' };
+          }
+          
+          return {
+            valid: true,
+            metadata: {
+              duration: parseFloat(metadata.format.duration) || 0,
+              size: stats.size,
+              format: metadata.format.format_name,
+              codec: videoStream.codec_name,
+              resolution: `${videoStream.width}x${videoStream.height}`,
+              fps: eval(videoStream.avg_frame_rate) || 'unknown'
+            }
+          };
+          
+        } catch (ffprobeError) {
+          return { 
+            valid: false, 
+            reason: `FFprobe validation failed: ${ffprobeError.message}`,
+            suggestedAction: 'File may be corrupted or incomplete'
+          };
+        }
+        
+      } else {
+        // Try to identify what kind of file this actually is
+        const header = buffer.slice(0, 16);
+        let fileType = 'unknown';
+        
+        if (header.slice(0, 4).toString('ascii') === 'ftyp') {
+          fileType = 'MP4';
+        } else if (header.slice(0, 3).toString('ascii') === 'GIF') {
+          fileType = 'GIF';
+        } else if (header.slice(0, 2).toString('hex') === 'ffd8') {
+          fileType = 'JPEG';
+        } else if (header.slice(0, 8).toString('ascii').includes('PNG')) {
+          fileType = 'PNG';
+        } else if (header.slice(0, 4).toString('ascii') === 'RIFF') {
+          fileType = 'AVI or WAV';
+        }
+        
+        return {
+          valid: false,
+          reason: `Not a valid WebM file. Detected format: ${fileType}`,
+          headerHex: header.toString('hex'),
+          headerAscii: header.toString('ascii').replace(/[^\x20-\x7E]/g, '.')
+        };
+      }
+      
+    } finally {
+      await fileHandle.close();
+    }
+    
+  } catch (error) {
+    return { 
+      valid: false, 
+      reason: `Validation error: ${error.message}` 
+    };
+  }
+}
+
+/**
  * Merge video chunks using FFmpeg
  * Combines WebM chunks into a single MP4 file
  */
@@ -1211,72 +1326,167 @@ async function mergeVideoChunks(sessionId, sessionData) {
       throw new Error(`Chunks directory not found: ${chunksDir}`);
     }
     
-    // Get all chunk files and sort them by index
+    // Get all chunk files and validate them thoroughly
     const chunkFiles = [];
+    const validationResults = [];
+    
+    console.log(`🔍 Validating ${sessionData.chunks.length} chunk files...`);
+    
     for (const chunk of sessionData.chunks) {
       const chunkPath = path.join(chunksDir, chunk.filename);
+      
       try {
         await fs.access(chunkPath);
-        chunkFiles.push({
-          index: chunk.chunkIndex,
-          path: chunkPath,
-          filename: chunk.filename
-        });
-        console.log(`✅ Found chunk ${chunk.chunkIndex}: ${chunk.filename}`);
+        
+        console.log(`🔍 Validating chunk ${chunk.chunkIndex}: ${chunk.filename}`);
+        const validation = await validateChunkFile(chunkPath);
+        validationResults.push({ chunk, validation });
+        
+        if (validation.valid) {
+          chunkFiles.push({
+            index: chunk.chunkIndex,
+            path: chunkPath,
+            filename: chunk.filename,
+            size: validation.metadata.size,
+            duration: validation.metadata.duration,
+            format: validation.metadata.format,
+            codec: validation.metadata.codec,
+            resolution: validation.metadata.resolution
+          });
+          
+          console.log(`✅ Chunk ${chunk.chunkIndex} valid: ${validation.metadata.format}, ${validation.metadata.duration}s, ${validation.metadata.resolution}`);
+          
+        } else {
+          console.error(`❌ Chunk ${chunk.chunkIndex} invalid: ${validation.reason}`);
+          if (validation.suggestedAction) {
+            console.error(`   💡 Suggestion: ${validation.suggestedAction}`);
+          }
+          if (validation.headerHex) {
+            console.error(`   📋 File header: ${validation.headerHex}`);
+          }
+        }
+        
       } catch (error) {
-        console.warn(`⚠️  Chunk file not found: ${chunkPath}`);
+        console.error(`❌ Cannot access chunk file: ${chunkPath} - ${error.message}`);
+        validationResults.push({ 
+          chunk, 
+          validation: { valid: false, reason: `File access error: ${error.message}` } 
+        });
       }
     }
     
-    if (chunkFiles.length === 0) {
-      throw new Error('No chunk files found to merge');
+    // Report validation summary
+    const validChunks = validationResults.filter(r => r.validation.valid).length;
+    const invalidChunks = validationResults.filter(r => !r.validation.valid).length;
+    
+    console.log(`📊 Validation Summary:`);
+    console.log(`   ✅ Valid chunks: ${validChunks}/${sessionData.chunks.length}`);
+    console.log(`   ❌ Invalid chunks: ${invalidChunks}/${sessionData.chunks.length}`);
+    
+    if (invalidChunks > 0) {
+      console.log(`� Invalid chunk details:`);
+      validationResults
+        .filter(r => !r.validation.valid)
+        .forEach(r => {
+          console.log(`   - ${r.chunk.filename}: ${r.validation.reason}`);
+        });
     }
+    
+    if (chunkFiles.length === 0) {
+      const errorMsg = `No valid chunk files found. Validation results:
+${validationResults.map(r => `  - ${r.chunk.filename}: ${r.validation.valid ? 'OK' : r.validation.reason}`).join('\n')}
+
+This usually indicates:
+1. Recording process created invalid or corrupted WebM files
+2. Files were modified or truncated after creation
+3. Network transfer corrupted the files
+4. Disk space issues during recording
+
+Suggestion: Check the recording process and ensure WebM chunks are properly created.`;
+      
+      throw new Error(errorMsg);
+    }
+    
+    console.log(`📊 Processing Summary:`);
+    console.log(`   Total valid chunks: ${chunkFiles.length}`);
+    console.log(`   Total duration: ${chunkFiles.reduce((sum, f) => sum + f.duration, 0).toFixed(2)}s`);
+    console.log(`   Total size: ${(chunkFiles.reduce((sum, f) => sum + f.size, 0) / 1024 / 1024).toFixed(2)}MB`);
+    console.log(`   Formats: ${[...new Set(chunkFiles.map(f => f.format))].join(', ')}`);
+    console.log(`   Codecs: ${[...new Set(chunkFiles.map(f => f.codec))].join(', ')}`);
+    console.log(`   Resolutions: ${[...new Set(chunkFiles.map(f => f.resolution))].join(', ')}`);
     
     // Sort chunks by index
     chunkFiles.sort((a, b) => a.index - b.index);
-    console.log(`🔢 Merging ${chunkFiles.length} chunks in order`);
+    console.log(`🔢 Merging ${chunkFiles.length} validated chunks in order`);
     
-    // Use FFmpeg to merge chunks - Use filter_complex for proper WebM merging
+    // Create a file list for FFmpeg concat demuxer (much simpler for many files)
+    const fileListPath = path.join(sessionDir, 'filelist.txt');
+    const fileListContent = chunkFiles
+      .map(chunk => {
+        // Use relative paths to avoid issues with spaces and long paths
+        const relativePath = path.relative(sessionDir, chunk.path);
+        return `file '${relativePath}'`;
+      })
+      .join('\n');
+    
+    await fs.writeFile(fileListPath, fileListContent, 'utf8');
+    console.log(`📝 Created file list: ${fileListPath}`);
+    console.log(`📋 File list content (${chunkFiles.length} entries):`);
+    console.log(fileListContent.split('\n').slice(0, 5).join('\n')); // Show first 5 entries
+    if (chunkFiles.length > 5) {
+      console.log(`   ... and ${chunkFiles.length - 5} more entries`);
+    }
+    
+    // Use FFmpeg concat demuxer with enhanced error handling
     return new Promise((resolve, reject) => {
       const startTime = Date.now();
       
-      const ffmpegCommand = ffmpeg();
+      console.log(`🔧 Using concat demuxer for ${chunkFiles.length} chunks (much more efficient)`);
       
-      // Add all chunk files as inputs
-      chunkFiles.forEach(chunk => {
-        ffmpegCommand.input(chunk.path);
-      });
+      const ffmpegCommand = ffmpeg()
+        .input(fileListPath)
+        .inputOptions([
+          '-f', 'concat',           // Use concat demuxer
+          '-safe', '0',             // Allow relative paths
+          '-protocol_whitelist', 'file,pipe'  // Security whitelist
+        ]);
+        
+      // Choose encoding strategy based on validation results
+      const allSameFormat = [...new Set(chunkFiles.map(f => f.format))].length === 1;
+      const allSameCodec = [...new Set(chunkFiles.map(f => f.codec))].length === 1;
+      const allSameResolution = [...new Set(chunkFiles.map(f => f.resolution))].length === 1;
       
-      // Use filter_complex to concatenate video streams properly
-      const filterInputs = chunkFiles.map((_, index) => `[${index}:v]`).join('');
-      const filterComplex = `${filterInputs}concat=n=${chunkFiles.length}:v=1:a=0[outv]`;
-      
-      console.log(`🔧 FFmpeg filter: ${filterComplex}`);
+      if (allSameFormat && allSameCodec && allSameResolution) {
+        console.log(`🚀 All chunks have identical format/codec/resolution - using stream copy for speed`);
+        ffmpegCommand.outputOptions([
+          '-c', 'copy',                    // Copy streams without re-encoding
+          '-avoid_negative_ts', 'make_zero', // Handle timestamp issues
+          '-fflags', '+genpts'            // Generate presentation timestamps
+        ]);
+      } else {
+        console.log(`🔄 Mixed formats/codecs detected - re-encoding for compatibility`);
+        console.log(`   Formats: ${[...new Set(chunkFiles.map(f => f.format))].join(', ')}`);
+        console.log(`   Codecs: ${[...new Set(chunkFiles.map(f => f.codec))].join(', ')}`);
+        console.log(`   Resolutions: ${[...new Set(chunkFiles.map(f => f.resolution))].join(', ')}`);
+        
+        ffmpegCommand.outputOptions([
+          '-c:v', 'libx264',           // Re-encode to H.264
+          '-preset', 'medium',         // Balance speed vs compression
+          '-crf', '23',               // Good quality
+          '-pix_fmt', 'yuv420p',      // Compatibility
+          '-movflags', 'faststart',   // Web optimization
+          '-avoid_negative_ts', 'make_zero'
+        ]);
+      }
       
       ffmpegCommand
-        .complexFilter([
-          {
-            filter: 'concat',
-            options: {
-              n: chunkFiles.length,
-              v: 1, // video streams
-              a: 0  // no audio streams (WebM chunks typically don't have audio)
-            },
-            inputs: chunkFiles.map((_, index) => `${index}:v`),
-            outputs: 'outv'
-          }
-        ])
-        .outputOptions([
-          '-map', '[outv]',
-          '-c:v', 'libx264',     // Re-encode to H.264 for MP4
-          '-preset', 'medium',   // Balance between speed and compression
-          '-crf', '23',          // Good quality setting
-          '-pix_fmt', 'yuv420p', // Ensure compatibility
-          '-movflags', 'faststart' // Enable fast start for web playback
-        ])
         .output(outputPath)
         .on('start', (commandLine) => {
           console.log(`🚀 FFmpeg started: ${commandLine}`);
+          console.log(`📁 Output path: ${outputPath}`);
+        })
+        .on('stderr', (stderrLine) => {
+          console.log(`FFmpeg stderr: ${stderrLine}`);
         })
         .on('progress', (progress) => {
           if (progress.percent) {
@@ -1295,6 +1505,14 @@ async function mergeVideoChunks(sessionId, sessionData) {
             console.log(`📊 Final video size: ${sizeMB}MB`);
             console.log(`✅ Successfully merged ${chunkFiles.length} WebM chunks into single MP4 file`);
             
+            // Clean up temporary file list
+            try {
+              await fs.unlink(fileListPath);
+              console.log(`🗑️  Removed temporary file list: ${fileListPath}`);
+            } catch (cleanupError) {
+              console.warn(`⚠️  Could not remove file list: ${cleanupError.message}`);
+            }
+            
             resolve({
               success: true,
               outputPath,
@@ -1309,7 +1527,39 @@ async function mergeVideoChunks(sessionId, sessionData) {
         })
         .on('error', (error) => {
           console.error(`❌ FFmpeg error: ${error.message}`);
-          reject(new Error(`Video merge failed: ${error.message}`));
+          console.error(`📊 Error context:`);
+          console.error(`   Session: ${sessionId}`);
+          console.error(`   Chunks: ${chunkFiles.length} files`);
+          console.error(`   First chunk: ${chunkFiles[0]?.path}`);
+          console.error(`   Output: ${outputPath}`);
+          
+          // Enhanced error analysis
+          let errorDetail = error.message;
+          if (error.message.includes('Invalid data found when processing input')) {
+            errorDetail = `Invalid WebM data detected. This usually means:
+            1. Chunk files are corrupted or incomplete
+            2. Files are not valid WebM format
+            3. Files were created with incompatible settings
+            Suggestion: Check if the recording process is properly creating WebM chunks`;
+          } else if (error.message.includes('Error opening input file')) {
+            errorDetail = `Cannot open input files. This usually means:
+            1. File permissions are incorrect
+            2. Files are locked by another process
+            3. Files were moved or deleted during processing
+            Suggestion: Check file permissions and ensure files exist`;
+          } else if (error.message.includes('No such file or directory')) {
+            errorDetail = `Files not found during processing. This usually means:
+            1. Files were deleted between validation and processing
+            2. Path resolution issues
+            Suggestion: Check if files still exist at expected paths`;
+          }
+          
+          // Clean up file list on error
+          fs.unlink(fileListPath)
+            .then(() => console.log(`🗑️  Cleaned up file list after error: ${fileListPath}`))
+            .catch(() => {}); // Ignore cleanup errors
+          
+          reject(new Error(`Video merge failed: ${errorDetail}`));
         })
         .run();
     });
