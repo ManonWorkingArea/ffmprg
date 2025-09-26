@@ -58,12 +58,24 @@ const logRequest = (endpoint, data, status = 'success') => {
 const createSessionDirectory = async (sessionId) => {
   try {
     const sessionDir = path.join(SESSIONS_DIR, sessionId);
+    const chunksDir = path.join(sessionDir, 'chunks');
+    
+    console.log(`📁 Creating session directory: ${sessionDir}`);
     await fs.mkdir(sessionDir, { recursive: true });
     
-    const chunksDir = path.join(sessionDir, 'chunks');
+    console.log(`📁 Creating chunks directory: ${chunksDir}`);
     await fs.mkdir(chunksDir, { recursive: true });
     
-    console.log(`📁 Created session directory: ${sessionDir}`);
+    // Verify directories were created
+    try {
+      await fs.access(sessionDir);
+      await fs.access(chunksDir);
+      console.log(`✅ Session directories created successfully: ${sessionDir}`);
+    } catch (verifyError) {
+      console.error(`❌ Failed to verify session directories:`, verifyError);
+      throw verifyError;
+    }
+    
     return { sessionDir, chunksDir };
   } catch (error) {
     console.error(`❌ Error creating session directory for ${sessionId}:`, error);
@@ -77,8 +89,23 @@ const saveSessionMetadata = async (sessionId, sessionData) => {
     const sessionDir = path.join(SESSIONS_DIR, sessionId);
     const metadataPath = path.join(sessionDir, 'session.json');
     
+    console.log(`💾 Saving session metadata to: ${metadataPath}`);
+    
+    // Ensure directory exists
+    await fs.mkdir(sessionDir, { recursive: true });
+    
+    // Save the file
     await fs.writeFile(metadataPath, JSON.stringify(sessionData, null, 2), 'utf8');
-    console.log(`💾 Saved session metadata: ${metadataPath}`);
+    console.log(`✅ Session metadata saved successfully: ${metadataPath}`);
+    
+    // Verify the file was created
+    try {
+      await fs.access(metadataPath);
+      const stats = await fs.stat(metadataPath);
+      console.log(`📊 Session file size: ${stats.size} bytes`);
+    } catch (verifyError) {
+      console.error(`❌ Failed to verify session file: ${metadataPath}`, verifyError);
+    }
     
     return metadataPath;
   } catch (error) {
@@ -92,6 +119,14 @@ const loadSessionMetadata = async (sessionId) => {
   try {
     const sessionDir = path.join(SESSIONS_DIR, sessionId);
     const metadataPath = path.join(sessionDir, 'session.json');
+    
+    // Check if file exists first
+    try {
+      await fs.access(metadataPath);
+    } catch (accessError) {
+      console.error(`❌ Session metadata file not found: ${metadataPath}`);
+      return null;
+    }
     
     const data = await fs.readFile(metadataPath, 'utf8');
     return JSON.parse(data);
@@ -203,6 +238,7 @@ router.post('/recording/init', async (req, res) => {
     
     // Create session directory structure
     const { sessionDir, chunksDir } = await createSessionDirectory(finalSessionId);
+    console.log(`📁 Session directories created: ${sessionDir}`);
     
     // Create session data
     const sessionData = {
@@ -223,9 +259,11 @@ router.post('/recording/init', async (req, res) => {
     
     // Save session metadata to JSON file
     await saveSessionMetadata(finalSessionId, sessionData);
+    console.log(`💾 Session metadata saved for: ${finalSessionId}`);
     
     // Store session in memory for quick access
     sessions.set(finalSessionId, sessionData);
+    console.log(`🧠 Session stored in memory: ${finalSessionId}`);
     
     logRequest('/api/media/recording/init', `Session created: ${finalSessionId}`, 'success');
     
@@ -293,11 +331,46 @@ router.post('/recording/chunk', upload.single('chunk'), async (req, res) => {
     }
     
     if (!sessionData) {
-      return res.status(404).json({
-        success: false,
-        error: 'Session not found',
-        sessionId
-      });
+      console.error(`❌ Session not found: ${sessionId}`);
+      
+      // Attempt to create a basic session if directory structure exists
+      const sessionDir = path.join(SESSIONS_DIR, sessionId);
+      try {
+        await fs.access(sessionDir);
+        console.log(`📁 Session directory exists, creating basic session: ${sessionId}`);
+        
+        // Create basic session data
+        const basicSessionData = {
+          sessionId: sessionId,
+          timestamp: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          status: 'initialized',
+          totalChunks: 0,
+          totalSize: 0,
+          chunks: [],
+          recovered: true,
+          directories: {
+            sessionDir,
+            chunksDir: path.join(sessionDir, 'chunks')
+          }
+        };
+        
+        await saveSessionMetadata(sessionId, basicSessionData);
+        sessions.set(sessionId, basicSessionData);
+        sessionData = basicSessionData;
+        
+        console.log(`✅ Session recovered: ${sessionId}`);
+        
+      } catch (dirError) {
+        console.error(`❌ Session directory not found: ${sessionDir}`);
+        return res.status(404).json({
+          success: false,
+          error: 'Session not found and cannot be recovered',
+          sessionId,
+          details: 'Please initialize a new session first'
+        });
+      }
     }
     
     // Parse metadata if provided
@@ -422,11 +495,46 @@ router.post('/recording/finalize', async (req, res) => {
     }
     
     if (!sessionData) {
-      return res.status(404).json({
-        success: false,
-        error: 'Session not found',
-        sessionId
-      });
+      console.error(`❌ Session not found for finalization: ${sessionId}`);
+      
+      // Attempt to create a basic session for finalization if directory exists
+      const sessionDir = path.join(SESSIONS_DIR, sessionId);
+      try {
+        await fs.access(sessionDir);
+        console.log(`📁 Session directory exists for finalization, creating basic session: ${sessionId}`);
+        
+        // Create basic session data with finalization info
+        const basicSessionData = {
+          sessionId: sessionId,
+          timestamp: new Date().toISOString(),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          status: 'initialized',
+          totalChunks: 0,
+          totalSize: 0,
+          chunks: [],
+          recovered: true,
+          directories: {
+            sessionDir,
+            chunksDir: path.join(sessionDir, 'chunks')
+          }
+        };
+        
+        await saveSessionMetadata(sessionId, basicSessionData);
+        sessions.set(sessionId, basicSessionData);
+        sessionData = basicSessionData;
+        
+        console.log(`✅ Session recovered for finalization: ${sessionId}`);
+        
+      } catch (dirError) {
+        console.error(`❌ Session directory not found for finalization: ${sessionDir}`);
+        return res.status(404).json({
+          success: false,
+          error: 'Session not found and cannot be recovered for finalization',
+          sessionId,
+          details: 'Session may have been deleted or never properly initialized'
+        });
+      }
     }
     
     // Real HTTP request simulation
