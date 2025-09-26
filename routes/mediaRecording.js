@@ -52,1145 +52,58 @@ const initializeDirectories = async () => {
     }
     
   } catch (error) {
-    console.error('❌ CRITICAL ERROR: Cannot create media recording directories:', error);
-    console.error(`📍 Current working directory: ${process.cwd()}`);
-    console.error(`📍 Process user: ${process.getuid ? process.getuid() : 'N/A'}`);
-    console.error('💡 Please ensure the Node.js process has write permissions to create directories');
-    
-    // Try alternative directory in /tmp as fallback
-    try {
-      console.log('🔄 Attempting fallback to temporary directory...');
-      const fallbackDir = path.join('/tmp', 'ffmprg-media-recording', 'sessions');
-      await fs.mkdir(fallbackDir, { recursive: true, mode: 0o755 });
-      console.log(`⚠️  Using fallback directory: ${fallbackDir}`);
-      console.log('⚠️  WARNING: Files will be stored in /tmp and may be lost on server restart');
-      
-      // Update the constants to use fallback
-      // Note: This is a runtime change and won't persist
-      Object.defineProperty(global, 'MEDIA_FALLBACK_DIR', { value: fallbackDir });
-      
-    } catch (fallbackError) {
-      console.error('❌ Fallback directory creation also failed:', fallbackError);
-      throw new Error(`Cannot create media recording directories. Original error: ${error.message}, Fallback error: ${fallbackError.message}`);
-    }
-  }
-};
-
-// Initialize on startup with retry mechanism
-const initializeWithRetry = async (maxRetries = 3, delay = 1000) => {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      await initializeDirectories();
-      return; // Success, exit retry loop
-    } catch (error) {
-      console.error(`❌ Directory initialization attempt ${attempt}/${maxRetries} failed:`, error.message);
-      
-      if (attempt === maxRetries) {
-        console.error('❌ All directory initialization attempts failed');
-        console.error('💡 Media recording features may not work properly');
-        console.error('💡 Please check server permissions and file system access');
-        // Don't throw error to prevent server startup failure
-        return;
-      }
-      
-      // Wait before retry
-      await new Promise(resolve => setTimeout(resolve, delay * attempt));
-    }
-  }
-};
-
-// Initialize on startup
-initializeWithRetry();
-
-// In-memory storage for session data (in production, use Redis or database)
-const sessions = new Map();
-const chunks = new Map();
-
-// Utility functions
-const generateSessionId = () => {
-  const timestamp = Date.now();
-  const random = Math.random().toString(36).substring(2, 8);
-  return `rec_${timestamp}_${random}`;
-};
-
-const validateSessionData = (sessionData) => {
-  const required = ['sessionId', 'timestamp'];
-  return required.every(field => sessionData[field]);
-};
-
-const logRequest = (endpoint, data, status = 'success') => {
-  const timestamp = new Date().toISOString();
-  console.log(`📡 [${timestamp}] ${endpoint}: ${status}`, 
-    typeof data === 'object' ? JSON.stringify(data, null, 2) : data);
-};
-
-// Create session directory and JSON file with enhanced error handling
-const createSessionDirectory = async (sessionId) => {
-  try {
-    // Check if we're using fallback directory
-    const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
-    const sessionDir = path.join(sessionsDir, sessionId);
-    const chunksDir = path.join(sessionDir, 'chunks');
-    
-    console.log(`📁 Creating session directory: ${sessionDir}`);
-    
-    // Create session directory with explicit permissions
-    try {
-      await fs.mkdir(sessionDir, { recursive: true, mode: 0o755 });
-      console.log(`✅ Session directory created: ${sessionDir}`);
-    } catch (sessionDirError) {
-      console.error(`❌ Failed to create session directory: ${sessionDirError.message}`);
-      
-      // Try to check if directory already exists
-      try {
-        await fs.access(sessionDir, fs.constants.R_OK | fs.constants.W_OK);
-        console.log(`📁 Session directory already exists and is accessible: ${sessionDir}`);
-      } catch (accessError) {
-        throw new Error(`Cannot create or access session directory: ${sessionDirError.message}`);
-      }
-    }
-    
-    console.log(`📁 Creating chunks directory: ${chunksDir}`);
-    
-    // Create chunks directory with explicit permissions
-    try {
-      await fs.mkdir(chunksDir, { recursive: true, mode: 0o755 });
-      console.log(`✅ Chunks directory created: ${chunksDir}`);
-    } catch (chunksDirError) {
-      console.error(`❌ Failed to create chunks directory: ${chunksDirError.message}`);
-      
-      // Try to check if directory already exists
-      try {
-        await fs.access(chunksDir, fs.constants.R_OK | fs.constants.W_OK);
-        console.log(`📁 Chunks directory already exists and is accessible: ${chunksDir}`);
-      } catch (accessError) {
-        throw new Error(`Cannot create or access chunks directory: ${chunksDirError.message}`);
-      }
-    }
-    
-    // Verify directories were created and are accessible
-    try {
-      await fs.access(sessionDir, fs.constants.R_OK | fs.constants.W_OK);
-      await fs.access(chunksDir, fs.constants.R_OK | fs.constants.W_OK);
-      console.log(`✅ Session directories created and verified: ${sessionDir}`);
-    } catch (verifyError) {
-      console.error(`❌ Failed to verify session directories:`, verifyError);
-      throw new Error(`Session directories created but not accessible: ${verifyError.message}`);
-    }
-    
-    return { sessionDir, chunksDir };
-  } catch (error) {
-    console.error(`❌ Error creating session directory for ${sessionId}:`, error);
-    console.error(`📍 Current working directory: ${process.cwd()}`);
-    console.error(`📍 Target sessions directory: ${global.MEDIA_FALLBACK_DIR || SESSIONS_DIR}`);
-    throw error;
-  }
-};
-
-// Save session metadata to JSON file with enhanced error handling and permission checks
-const saveSessionMetadata = async (sessionId, sessionData) => {
-  try {
-    // Use fallback directory if available
-    const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
-    const sessionDir = path.join(sessionsDir, sessionId);
-    const metadataPath = path.join(sessionDir, 'session.json');
-    
-    console.log(`💾 Saving session metadata to: ${metadataPath}`);
-    
-    // Ensure directory exists with proper permissions
-    try {
-      await fs.mkdir(sessionDir, { recursive: true, mode: 0o755 });
-    } catch (mkdirError) {
-      // Check if directory exists and is accessible
-      try {
-        await fs.access(sessionDir, fs.constants.R_OK | fs.constants.W_OK);
-        console.log(`📁 Session directory already exists: ${sessionDir}`);
-      } catch (accessError) {
-        console.error(`❌ Cannot create or access session directory: ${mkdirError.message}`);
-        throw new Error(`Directory creation failed: ${mkdirError.message}`);
-      }
-    }
-    
-    // Save the file with proper permissions
-    try {
-      await fs.writeFile(metadataPath, JSON.stringify(sessionData, null, 2), { 
-        encoding: 'utf8',
-        mode: 0o644 
-      });
-      console.log(`✅ Session metadata saved successfully: ${metadataPath}`);
-    } catch (writeError) {
-      console.error(`❌ Failed to write session metadata: ${writeError.message}`);
-      
-      // Check if we can write to the directory
-      try {
-        await fs.access(sessionDir, fs.constants.W_OK);
-        console.error(`❌ Directory is writable, but file write failed`);
-      } catch (dirAccessError) {
-        console.error(`❌ Directory is not writable: ${dirAccessError.message}`);
-      }
-      
-      throw new Error(`Cannot write session metadata: ${writeError.message}`);
-    }
-    
-    // Verify the file was created and is readable
-    try {
-      await fs.access(metadataPath, fs.constants.R_OK);
-      const stats = await fs.stat(metadataPath);
-      console.log(`📊 Session file size: ${stats.size} bytes`);
-    } catch (verifyError) {
-      console.error(`❌ Failed to verify session file: ${metadataPath}`, verifyError);
-      throw new Error(`Session file created but not accessible: ${verifyError.message}`);
-    }
-    
-    return metadataPath;
-  } catch (error) {
-    console.error(`❌ Error saving session metadata for ${sessionId}:`, error);
-    console.error(`📍 Current working directory: ${process.cwd()}`);
-    console.error(`📍 Target directory: ${global.MEDIA_FALLBACK_DIR || SESSIONS_DIR}`);
-    console.error(`📍 Process UID: ${process.getuid ? process.getuid() : 'N/A'}`);
-    console.error(`📍 Process GID: ${process.getgid ? process.getgid() : 'N/A'}`);
-    throw error;
-  }
-};
-
-// Load session metadata from JSON file with enhanced error handling
-const loadSessionMetadata = async (sessionId) => {
-  try {
-    // Use fallback directory if available
-    const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
-    const sessionDir = path.join(sessionsDir, sessionId);
-    const metadataPath = path.join(sessionDir, 'session.json');
-    
-    // Check if file exists first
-    try {
-      await fs.access(metadataPath, fs.constants.R_OK);
-    } catch (accessError) {
-      console.error(`❌ Session metadata file not found: ${metadataPath}`);
-      
-      // Additional debugging information
-      try {
-        await fs.access(sessionDir, fs.constants.R_OK);
-        console.log(`📁 Session directory exists but metadata file is missing: ${sessionDir}`);
-        
-        // List directory contents for debugging
-        const files = await fs.readdir(sessionDir);
-        console.log(`📂 Directory contents: ${files.join(', ')}`);
-      } catch (dirAccessError) {
-        console.error(`❌ Session directory not accessible: ${sessionDir}`);
-      }
-      
-      return null;
-    }
-    
-    try {
-      const data = await fs.readFile(metadataPath, 'utf8');
-      return JSON.parse(data);
-    } catch (readError) {
-      console.error(`❌ Error reading session metadata file: ${metadataPath}`, readError);
-      return null;
-    }
-    
-  } catch (error) {
-    console.error(`❌ Error loading session metadata for ${sessionId}:`, error);
-    return null;
-  }
-};
-
-// Save chunk file and update session metadata with enhanced error handling
-const saveChunk = async (sessionId, chunkIndex, chunkFile, metadata) => {
-  try {
-    // Use fallback directory if available
-    const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
-    const sessionDir = path.join(sessionsDir, sessionId);
-    const chunksDir = path.join(sessionDir, 'chunks');
-    
-    // Generate chunk filename (convert to .webm as requested)
-    const chunkFilename = `chunk_${chunkIndex.toString().padStart(4, '0')}.webm`;
-    const chunkPath = path.join(chunksDir, chunkFilename);
-    
-    console.log(`💾 Saving chunk ${chunkIndex} to: ${chunkPath}`);
-    
-    // Ensure chunks directory exists
-    try {
-      await fs.mkdir(chunksDir, { recursive: true, mode: 0o755 });
-    } catch (mkdirError) {
-      try {
-        await fs.access(chunksDir, fs.constants.W_OK);
-        console.log(`📁 Chunks directory already exists: ${chunksDir}`);
-      } catch (accessError) {
-        console.error(`❌ Cannot create or access chunks directory: ${mkdirError.message}`);
-        throw new Error(`Chunks directory creation failed: ${mkdirError.message}`);
-      }
-    }
-    
-    // Move uploaded chunk to session directory
-    try {
-      await fs.copyFile(chunkFile.path, chunkPath);
-      console.log(`✅ Chunk copied successfully: ${chunkPath}`);
-    } catch (copyError) {
-      console.error(`❌ Failed to copy chunk file: ${copyError.message}`);
-      throw new Error(`Cannot copy chunk file: ${copyError.message}`);
-    }
-    
-    // Clean up temporary file
-    try {
-      await fs.unlink(chunkFile.path);
-      console.log(`🗑️ Temporary chunk file cleaned up: ${chunkFile.path}`);
-    } catch (unlinkError) {
-      console.warn(`⚠️  Failed to clean up temporary file: ${unlinkError.message}`);
-      // Don't throw error for cleanup failure
-    }
-    
-    // Load current session metadata
-    let sessionData = await loadSessionMetadata(sessionId);
-    if (!sessionData) {
-      console.error(`❌ Session metadata not found for chunk save: ${sessionId}`);
-      throw new Error(`Session metadata not found for ${sessionId}`);
-    }
-    
-    // Update chunk list in session data
-    const chunkInfo = {
-      chunkIndex: chunkIndex,
-      filename: chunkFilename,
-      path: chunkPath,
-      originalName: chunkFile.originalname,
-      size: chunkFile.size,
-      mimetype: chunkFile.mimetype,
-      uploadedAt: new Date().toISOString(),
-      metadata: metadata || {}
-    };
-    
-    // Add or update chunk in chunks array
-    const existingChunkIndex = sessionData.chunks.findIndex(c => c.chunkIndex === chunkIndex);
-    if (existingChunkIndex >= 0) {
-      sessionData.chunks[existingChunkIndex] = chunkInfo;
+    // Provide detailed error information for debugging
+    if (error.code === 'EACCES') {
+      console.error('❌ Permission denied creating media recording directories');
+      console.error(`   Working directory: ${process.cwd()}`);
+      console.error(`   Target directory: ${SESSIONS_DIR}`);
+      console.error(`   User: ${process.env.USER || 'unknown'}`);
+      console.error(`   Process UID/GID: ${process.getuid?.() || 'unknown'}/${process.getgid?.() || 'unknown'}`);
+    } else if (error.code === 'ENOSPC') {
+      console.error('❌ Insufficient disk space for media recording directories');
+    } else if (error.code === 'EROFS') {
+      console.error('❌ File system is read-only, cannot create media recording directories');
     } else {
-      sessionData.chunks.push(chunkInfo);
+      console.error(`❌ Unexpected error creating media recording directories: ${error.message}`);
+      console.error('Error details:', error);
     }
     
-    // Sort chunks by index
-    sessionData.chunks.sort((a, b) => a.chunkIndex - b.chunkIndex);
+    throw new Error(`Failed to initialize media recording directories: ${error.message}`);
+  }
+};
+
+// Global session store for active sessions
+const activeSessions = new Map();
+let directoryInitialized = false;
+
+/**
+ * Initialize directories when the module is first loaded
+ */
+const initializeOnce = async () => {
+  if (!directoryInitialized) {
+    await initializeDirectories();
+    directoryInitialized = true;
     
-    // Update totals
-    sessionData.totalChunks = sessionData.chunks.length;
-    sessionData.totalSize = sessionData.chunks.reduce((sum, chunk) => sum + chunk.size, 0);
-    sessionData.updatedAt = new Date().toISOString();
-    
-    // Save updated metadata
-    await saveSessionMetadata(sessionId, sessionData);
-    
-    console.log(`📦 Saved chunk ${chunkIndex} for session ${sessionId}: ${chunkFilename} (${(chunkFile.size / 1024 / 1024).toFixed(2)}MB)`);
-    
-    return {
-      chunkInfo,
-      sessionData,
-      chunkPath: `/api/media/recording/session/${sessionId}/chunks/${chunkFilename}`
-    };
-    
-  } catch (error) {
-    console.error(`❌ Error saving chunk ${chunkIndex} for session ${sessionId}:`, error);
-    
-    // Log additional debugging information
-    console.error(`📍 Working directory: ${process.cwd()}`);
-    console.error(`📍 Sessions directory: ${global.MEDIA_FALLBACK_DIR || SESSIONS_DIR}`);
-    console.error(`📍 Temporary chunk file: ${chunkFile.path}`);
-    
-    throw error;
+    // Clean up any stale upload files on startup
+    try {
+      const uploadsDir = path.resolve(process.cwd(), 'uploads', 'chunks');
+      const files = await fs.readdir(uploadsDir).catch(() => []);
+      
+      if (files.length > 0) {
+        console.log(`🧹 Cleaning up ${files.length} stale chunk files from previous session`);
+        await Promise.allSettled(
+          files.map(file => fs.unlink(path.join(uploadsDir, file)))
+        );
+        console.log('✅ Stale chunk cleanup completed');
+      }
+    } catch (error) {
+      console.warn('⚠️  Could not clean up stale chunks:', error.message);
+    }
   }
 };
 
 /**
- * Phase 1: Session Creation
- * POST /api/media/recording/init
- * 
- * Creates a new recording session with dummy response fallback
- * Creates session directory and JSON metadata file
- */
-router.post('/recording/init', async (req, res) => {
-  console.log('🎯 Route /recording/init hit!');
-  try {
-    const { sessionId, timestamp, dummyMode } = req.body;
-    
-    logRequest('/api/media/recording/init', req.body, 'received');
-    
-    // Generate sessionId if not provided
-    const finalSessionId = sessionId || generateSessionId();
-    
-    // Validate input data
-    if (!timestamp) {
-      logRequest('/api/media/recording/init', 'Missing timestamp', 'error');
-      return res.status(400).json({
-        success: false,
-        error: 'timestamp is required',
-        sessionId: finalSessionId
-      });
-    }
-    
-    // Real HTTP request simulation
-    if (dummyMode) {
-      console.log(`📡 Real HTTP request attempted but server not available`);
-      console.log(`📡 Fallback to dummy response for session: ${finalSessionId}`);
-    }
-    
-    // Create session directory structure
-    const { sessionDir, chunksDir } = await createSessionDirectory(finalSessionId);
-    console.log(`📁 Session directories created: ${sessionDir}`);
-    
-    // Create session data
-    const sessionData = {
-      sessionId: finalSessionId,
-      timestamp: new Date(timestamp).toISOString(),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      status: 'initialized',
-      totalChunks: 0,
-      totalSize: 0,
-      chunks: [],
-      dummyMode: Boolean(dummyMode),
-      directories: {
-        sessionDir,
-        chunksDir
-      }
-    };
-    
-    // Save session metadata to JSON file
-    await saveSessionMetadata(finalSessionId, sessionData);
-    console.log(`💾 Session metadata saved for: ${finalSessionId}`);
-    
-    // Store session in memory for quick access
-    sessions.set(finalSessionId, sessionData);
-    console.log(`🧠 Session stored in memory: ${finalSessionId}`);
-    
-    logRequest('/api/media/recording/init', `Session created: ${finalSessionId}`, 'success');
-    
-    // Return dummy response with real HTTP request note
-    const response = {
-      success: true,
-      sessionId: finalSessionId,
-      status: 'initialized',
-      timestamp: sessionData.timestamp,
-      sessionDir: sessionDir,
-      note: dummyMode ? "Real HTTP request attempted but server not available" : "Session initialized successfully"
-    };
-    
-    res.json(response);
-    
-  } catch (error) {
-    console.error('❌ Error in /api/media/recording/init:', error);
-    logRequest('/api/media/recording/init', error.message, 'error');
-    
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error',
-      details: error.message
-    });
-  }
-});
-
-/**
- * Phase 2: Chunk Upload
- * POST /api/media/recording/chunk
- * 
- * Handles video chunk uploads with real FormData processing
- * Converts chunks to .webm format and saves to session directory
- * Updates session JSON with chunk information
- */
-router.post('/recording/chunk', upload.single('chunk'), async (req, res) => {
-  console.log('🎯 Route /recording/chunk hit!');
-  try {
-    const { sessionId, chunkIndex, metadata, dummyMode } = req.body;
-    const chunkFile = req.file;
-    
-    logRequest('/api/media/recording/chunk', {
-      sessionId,
-      chunkIndex: parseInt(chunkIndex),
-      chunkSize: chunkFile?.size,
-      hasMetadata: Boolean(metadata),
-      dummyMode
-    }, 'received');
-    
-    // Validate required fields
-    if (!sessionId || chunkIndex === undefined || !chunkFile) {
-      return res.status(400).json({
-        success: false,
-        error: 'sessionId, chunkIndex, and chunk file are required'
-      });
-    }
-    
-    // Check if session exists (try memory first, then load from disk)
-    let sessionData = sessions.get(sessionId);
-    if (!sessionData) {
-      sessionData = await loadSessionMetadata(sessionId);
-      if (sessionData) {
-        sessions.set(sessionId, sessionData);
-      }
-    }
-    
-    if (!sessionData) {
-      console.error(`❌ Session not found: ${sessionId}`);
-      
-      // Attempt to create a basic session if directory structure exists
-      const sessionDir = path.join(SESSIONS_DIR, sessionId);
-      try {
-        await fs.access(sessionDir);
-        console.log(`📁 Session directory exists, creating basic session: ${sessionId}`);
-        
-        // Create basic session data
-        const basicSessionData = {
-          sessionId: sessionId,
-          timestamp: new Date().toISOString(),
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          status: 'initialized',
-          totalChunks: 0,
-          totalSize: 0,
-          chunks: [],
-          recovered: true,
-          directories: {
-            sessionDir,
-            chunksDir: path.join(sessionDir, 'chunks')
-          }
-        };
-        
-        await saveSessionMetadata(sessionId, basicSessionData);
-        sessions.set(sessionId, basicSessionData);
-        sessionData = basicSessionData;
-        
-        console.log(`✅ Session recovered: ${sessionId}`);
-        
-      } catch (dirError) {
-        console.error(`❌ Session directory not found: ${sessionDir}`);
-        return res.status(404).json({
-          success: false,
-          error: 'Session not found and cannot be recovered',
-          sessionId,
-          details: 'Please initialize a new session first'
-        });
-      }
-    }
-    
-    // Parse metadata if provided
-    let parsedMetadata = {};
-    if (metadata) {
-      try {
-        parsedMetadata = JSON.parse(metadata);
-      } catch (error) {
-        console.warn('⚠️  Invalid metadata JSON:', error.message);
-      }
-    }
-    
-    // Real HTTP request simulation
-    if (dummyMode) {
-      console.log(`📡 Sending real FormData request to: /api/media/recording/chunk`);
-      console.log(`📡 Real chunk request failed as expected (no server): Failed to fetch`);
-      console.log(`📡 Fallback to dummy response for chunk ${chunkIndex}`);
-    }
-    
-    const chunkIndexNum = parseInt(chunkIndex);
-    
-    // Save chunk to session directory and update metadata
-    const {
-      chunkInfo,
-      sessionData: updatedSessionData,
-      chunkPath
-    } = await saveChunk(sessionId, chunkIndexNum, chunkFile, parsedMetadata);
-    
-    // Update session in memory
-    sessions.set(sessionId, updatedSessionData);
-    
-    // Store chunk data in memory map for backwards compatibility
-    const chunkId = `${sessionId}_chunk_${chunkIndexNum}`;
-    chunks.set(chunkId, {
-      chunkId,
-      sessionId,
-      chunkIndex: chunkIndexNum,
-      size: chunkFile.size,
-      originalName: chunkFile.originalname,
-      filename: chunkInfo.filename,
-      path: chunkInfo.path,
-      mimetype: chunkFile.mimetype,
-      uploadedAt: chunkInfo.uploadedAt,
-      metadata: parsedMetadata,
-      dummyPath: `/dummy/chunks/${sessionId}/chunk_${chunkIndexNum}.webm` // Dummy server path for compatibility
-    });
-    
-    logRequest('/api/media/recording/chunk', 
-      `Chunk ${chunkIndexNum} uploaded and saved: ${(chunkFile.size / 1024 / 1024).toFixed(2)}MB`, 'success');
-    
-    // Return response with actual file path
-    const response = {
-      success: true,
-      chunkIndex: chunkIndexNum,
-      path: chunkPath, // Real path to saved chunk
-      filename: chunkInfo.filename,
-      uploadedSize: chunkFile.size,
-      status: 'uploaded',
-      sessionTotalChunks: updatedSessionData.totalChunks,
-      sessionTotalSize: updatedSessionData.totalSize,
-      note: dummyMode ? "Real HTTP request attempted but server not available" : "Chunk uploaded successfully"
-    };
-    
-    res.json(response);
-    
-  } catch (error) {
-    console.error('❌ Error in /api/media/recording/chunk:', error);
-    logRequest('/api/media/recording/chunk', error.message, 'error');
-    
-    // Cleanup uploaded file if error occurs
-    if (req.file && req.file.path) {
-      try {
-        await fs.unlink(req.file.path);
-      } catch (cleanupError) {
-        console.error('Error cleaning up uploaded chunk:', cleanupError);
-      }
-    }
-    
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error',
-      details: error.message
-    });
-  }
-});
-
-/**
- * Phase 3: Session Finalization
- * POST /api/media/recording/finalize
- * 
- * Finalizes recording session and prepares final video output
- * Updates session JSON with final status
- */
-router.post('/recording/finalize', async (req, res) => {
-  console.log('🎯 Route /recording/finalize hit!');
-  try {
-    const { sessionId, totalChunks, totalSize, chunks: clientChunks, dummyMode } = req.body;
-    
-    logRequest('/api/media/recording/finalize', {
-      sessionId,
-      totalChunks,
-      totalSizeMB: totalSize ? (totalSize / 1024 / 1024).toFixed(2) : null,
-      clientChunksCount: clientChunks?.length,
-      dummyMode
-    }, 'received');
-    
-    // Validate required fields
-    if (!sessionId || totalChunks === undefined) {
-      return res.status(400).json({
-        success: false,
-        error: 'sessionId and totalChunks are required'
-      });
-    }
-    
-    // Load session data
-    let sessionData = sessions.get(sessionId);
-    if (!sessionData) {
-      sessionData = await loadSessionMetadata(sessionId);
-      if (sessionData) {
-        sessions.set(sessionId, sessionData);
-      }
-    }
-    
-    if (!sessionData) {
-      console.error(`❌ Session not found for finalization: ${sessionId}`);
-      
-      // Attempt to create a basic session for finalization if directory exists
-      const sessionDir = path.join(SESSIONS_DIR, sessionId);
-      try {
-        await fs.access(sessionDir);
-        console.log(`📁 Session directory exists for finalization, creating basic session: ${sessionId}`);
-        
-        // Create basic session data with finalization info
-        const basicSessionData = {
-          sessionId: sessionId,
-          timestamp: new Date().toISOString(),
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          status: 'initialized',
-          totalChunks: 0,
-          totalSize: 0,
-          chunks: [],
-          recovered: true,
-          directories: {
-            sessionDir,
-            chunksDir: path.join(sessionDir, 'chunks')
-          }
-        };
-        
-        await saveSessionMetadata(sessionId, basicSessionData);
-        sessions.set(sessionId, basicSessionData);
-        sessionData = basicSessionData;
-        
-        console.log(`✅ Session recovered for finalization: ${sessionId}`);
-        
-      } catch (dirError) {
-        console.error(`❌ Session directory not found for finalization: ${sessionDir}`);
-        return res.status(404).json({
-          success: false,
-          error: 'Session not found and cannot be recovered for finalization',
-          sessionId,
-          details: 'Session may have been deleted or never properly initialized'
-        });
-      }
-    }
-    
-    // Real HTTP request simulation
-    if (dummyMode) {
-      console.log(`📡 Sending real HTTP request to: /api/media/recording/finalize`);
-      console.log(`📡 Real finalize request failed as expected (no server): Failed to fetch`);
-      console.log(`📡 Fallback to dummy response for finalization`);
-    }
-    
-    // Update session with finalization data
-    sessionData.status = 'completed';
-    sessionData.finalizedAt = new Date().toISOString();
-    sessionData.updatedAt = new Date().toISOString();
-    sessionData.clientTotalChunks = totalChunks;
-    sessionData.clientTotalSize = totalSize;
-    sessionData.failedChunks = 0; // In production, calculate actual failed chunks
-    
-    // Validate chunk consistency (optional)
-    if (clientChunks && Array.isArray(clientChunks)) {
-      sessionData.clientChunks = clientChunks;
-      // In production, verify chunk integrity here
-    }
-    
-    // Save updated session metadata
-    await saveSessionMetadata(sessionId, sessionData);
-    sessions.set(sessionId, sessionData);
-    
-    logRequest('/api/media/recording/finalize', 
-      `Session ${sessionId} finalized: ${totalChunks} chunks, ${(totalSize / 1024 / 1024).toFixed(2)}MB`, 'success');
-    
-    // Process video chunks with FFmpeg
-    let mergeResult = null;
-    let cleanupResult = null;
-    let processingNote = dummyMode ? "Real HTTP request attempted but server not available" : "Session finalized successfully";
-    
-    try {
-      if (sessionData.chunks && sessionData.chunks.length > 0) {
-        console.log(`🎬 Starting video processing for ${sessionData.chunks.length} chunks`);
-        
-        // Merge video chunks using FFmpeg
-        mergeResult = await mergeVideoChunks(sessionId, sessionData);
-        console.log(`✅ Video merge successful:`, mergeResult);
-        
-        // Clean up chunk files after successful merge
-        if (mergeResult.success) {
-          cleanupResult = await cleanupChunkFiles(sessionId, sessionData);
-          console.log(`✅ Cleanup successful:`, cleanupResult);
-          
-          // Update session with merge results
-          sessionData.videoProcessing = {
-            merged: true,
-            mergedAt: new Date().toISOString(),
-            finalVideoPath: mergeResult.outputPath,
-            finalVideoSizeMB: mergeResult.sizeMB,
-            mergeDurationSeconds: mergeResult.duration,
-            chunksProcessed: mergeResult.chunksProcessed,
-            cleanup: {
-              deletedFiles: cleanupResult.deletedFiles,
-              spacesFreedMB: cleanupResult.totalSizeFreedMB
-            }
-          };
-          
-          // Save updated session with video processing info
-          await saveSessionMetadata(sessionId, sessionData);
-          sessions.set(sessionId, sessionData);
-          
-          processingNote = `Video merged successfully: ${mergeResult.chunksProcessed} chunks → ${mergeResult.sizeMB}MB MP4, ${cleanupResult.deletedFiles} chunk files cleaned up`;
-        }
-        
-      } else {
-        console.warn(`⚠️  No chunks found for session ${sessionId}, skipping video processing`);
-        processingNote += " (No chunks to process)";
-      }
-      
-    } catch (videoError) {
-      console.error(`❌ Video processing failed for session ${sessionId}:`, videoError);
-      processingNote += ` (Video processing failed: ${videoError.message})`;
-      
-      // Update session with error info
-      sessionData.videoProcessing = {
-        merged: false,
-        error: videoError.message,
-        errorAt: new Date().toISOString()
-      };
-      
-      await saveSessionMetadata(sessionId, sessionData);
-      sessions.set(sessionId, sessionData);
-    }
-    
-    // Return response with video processing results
-    const response = {
-      success: true,
-      sessionId,
-      status: 'completed',
-      finalVideoUrl: mergeResult && mergeResult.success 
-        ? `/api/media/recording/session/${sessionId}/video` 
-        : `/dummy/final/${sessionId}_final.mp4`,
-      actualChunksPath: `/api/media/recording/session/${sessionId}/chunks`,
-      totalChunks: sessionData.totalChunks,
-      totalSizeMB: parseFloat((sessionData.totalSize / 1024 / 1024).toFixed(1)),
-      finalizedAt: sessionData.finalizedAt,
-      processingTime: calculateProcessingTime(sessionData.createdAt, sessionData.finalizedAt),
-      failedChunks: sessionData.failedChunks,
-      videoProcessing: sessionData.videoProcessing || { merged: false, note: "No chunks to process" },
-      note: processingNote
-    };
-    
-    res.json(response);
-    
-  } catch (error) {
-    console.error('❌ Error in /api/media/recording/finalize:', error);
-    logRequest('/api/media/recording/finalize', error.message, 'error');
-    
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error',
-      details: error.message
-    });
-  }
-});
-
-/**
- * Get Session Status
- * GET /api/media/recording/session/:sessionId
- * 
- * Returns current session status and progress from JSON file
- */
-router.get('/session/:sessionId', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    
-    // Load session data from JSON file
-    const sessionData = await loadSessionMetadata(sessionId);
-    
-    if (!sessionData) {
-      return res.status(404).json({
-        success: false,
-        error: 'Session not found',
-        sessionId
-      });
-    }
-    
-    const response = {
-      success: true,
-      session: {
-        ...sessionData,
-        chunksDetails: sessionData.chunks.map(chunk => ({
-          index: chunk.chunkIndex,
-          filename: chunk.filename,
-          size: chunk.size,
-          path: chunk.path,
-          uploadedAt: chunk.uploadedAt,
-          sizeMB: parseFloat((chunk.size / 1024 / 1024).toFixed(2))
-        }))
-      }
-    };
-    
-    res.json(response);
-    
-  } catch (error) {
-    console.error('❌ Error getting session status:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error',
-      details: error.message
-    });
-  }
-});
-
-/**
- * Get Chunk File
- * GET /api/media/recording/session/:sessionId/chunks/:chunkFilename
- * 
- * Serves individual chunk files
- */
-router.get('/session/:sessionId/chunks/:chunkFilename', async (req, res) => {
-  try {
-    const { sessionId, chunkFilename } = req.params;
-    
-    const sessionData = await loadSessionMetadata(sessionId);
-    if (!sessionData) {
-      return res.status(404).json({
-        success: false,
-        error: 'Session not found'
-      });
-    }
-    
-    const chunkPath = path.join(SESSIONS_DIR, sessionId, 'chunks', chunkFilename);
-    
-    // Check if chunk file exists
-    try {
-      await fs.access(chunkPath);
-      res.sendFile(path.resolve(chunkPath));
-    } catch (error) {
-      return res.status(404).json({
-        success: false,
-        error: 'Chunk file not found'
-      });
-    }
-    
-  } catch (error) {
-    console.error('❌ Error serving chunk file:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error',
-      details: error.message
-    });
-  }
-});
-
-/**
- * Get All Sessions
- * GET /api/media/recording/sessions
- * 
- * Returns all active sessions by scanning session directories
- */
-router.get('/sessions', async (req, res) => {
-  try {
-    const sessionDirs = await fs.readdir(SESSIONS_DIR);
-    const allSessions = [];
-    
-    for (const sessionId of sessionDirs) {
-      try {
-        const sessionData = await loadSessionMetadata(sessionId);
-        if (sessionData) {
-          allSessions.push({
-            sessionId: sessionData.sessionId,
-            status: sessionData.status,
-            createdAt: sessionData.createdAt,
-            totalChunks: sessionData.totalChunks,
-            totalSizeMB: parseFloat((sessionData.totalSize / 1024 / 1024).toFixed(2)),
-            dummyMode: sessionData.dummyMode
-          });
-        }
-      } catch (error) {
-        console.warn(`Warning: Could not load session ${sessionId}:`, error.message);
-      }
-    }
-    
-    res.json({
-      success: true,
-      sessions: allSessions,
-      totalSessions: allSessions.length
-    });
-    
-  } catch (error) {
-    console.error('❌ Error getting sessions:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error',
-      details: error.message
-    });
-  }
-});
-
-/**
- * Delete Session
- * DELETE /api/media/recording/session/:sessionId
- * 
- * Deletes session directory and all associated files
- */
-router.delete('/session/:sessionId', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    
-    const sessionData = await loadSessionMetadata(sessionId);
-    if (!sessionData) {
-      return res.status(404).json({
-        success: false,
-        error: 'Session not found',
-        sessionId
-      });
-    }
-    
-    // Remove session directory and all contents
-    const sessionDir = path.join(SESSIONS_DIR, sessionId);
-    await fs.rm(sessionDir, { recursive: true, force: true });
-    
-    // Remove from memory
-    sessions.delete(sessionId);
-    
-    // Remove associated chunks from memory map
-    const sessionChunks = Array.from(chunks.keys())
-      .filter(chunkId => chunkId.startsWith(`${sessionId}_chunk_`));
-    
-    for (const chunkId of sessionChunks) {
-      chunks.delete(chunkId);
-    }
-    
-    logRequest('/api/media/recording/session (DELETE)', 
-      `Session ${sessionId} deleted completely`, 'success');
-    
-    res.json({
-      success: true,
-      message: 'Session deleted successfully',
-      sessionId,
-      deletedDirectory: sessionDir
-    });
-    
-  } catch (error) {
-    console.error('❌ Error deleting session:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error',
-      details: error.message
-    });
-  }
-});
-
-/**
- * System Status
- * GET /api/media/recording/status
- * 
- * Returns system status and metrics
- */
-router.get('/status', async (req, res) => {
-  try {
-    const sessionDirs = await fs.readdir(SESSIONS_DIR);
-    let totalSessions = 0;
-    let activeSessions = 0;
-    let completedSessions = 0;
-    let totalChunks = 0;
-    let totalStorageUsed = 0;
-    
-    for (const sessionId of sessionDirs) {
-      try {
-        const sessionData = await loadSessionMetadata(sessionId);
-        if (sessionData) {
-          totalSessions++;
-          if (sessionData.status === 'initialized') activeSessions++;
-          if (sessionData.status === 'completed') completedSessions++;
-          totalChunks += sessionData.totalChunks;
-          totalStorageUsed += sessionData.totalSize;
-        }
-      } catch (error) {
-        // Skip invalid sessions
-      }
-    }
-    
-    res.json({
-      success: true,
-      system: {
-        status: 'operational',
-        uptime: process.uptime(),
-        mode: 'file_storage_with_dummy_fallback',
-        storageDirectory: SESSIONS_DIR
-      },
-      sessions: {
-        total: totalSessions,
-        active: activeSessions,
-        completed: completedSessions
-      },
-      chunks: {
-        total: totalChunks,
-        totalSizeMB: parseFloat((totalStorageUsed / 1024 / 1024).toFixed(2))
-      },
-      configuration: {
-        chunkDurationMs: 5000,
-        maxChunkSizeMB: 50,
-        supportedFormats: ['webm', 'mp4'],
-        videoBitsPerSecond: 8000000,
-        frameRate: 60
-      }
-    });
-    
-  } catch (error) {
-    console.error('❌ Error getting system status:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error',
-      details: error.message
-    });
-  }
-});
-
-/**
- * Download Final Video
- * GET /api/media/recording/session/:sessionId/video
- * 
- * Serves the final merged MP4 video file
- */
-router.get('/session/:sessionId/video', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    
-    console.log(`📹 Video download request for session: ${sessionId}`);
-    
-    const sessionData = await loadSessionMetadata(sessionId);
-    if (!sessionData) {
-      return res.status(404).json({
-        success: false,
-        error: 'Session not found',
-        sessionId
-      });
-    }
-    
-    // Check if video processing was completed
-    if (!sessionData.videoProcessing || !sessionData.videoProcessing.merged) {
-      return res.status(404).json({
-        success: false,
-        error: 'Final video not available. Video processing may have failed or not been completed.',
-        sessionId,
-        videoProcessing: sessionData.videoProcessing || { status: 'not_processed' }
-      });
-    }
-    
-    const videoPath = sessionData.videoProcessing.finalVideoPath;
-    
-    // Check if video file exists
-    try {
-      await fs.access(videoPath);
-      const stats = await fs.stat(videoPath);
-      
-      console.log(`📤 Serving video: ${videoPath} (${(stats.size / 1024 / 1024).toFixed(2)}MB)`);
-      
-      // Set appropriate headers for video download
-      res.setHeader('Content-Type', 'video/mp4');
-      res.setHeader('Content-Length', stats.size);
-      res.setHeader('Content-Disposition', `attachment; filename="${sessionId}_final.mp4"`);
-      res.setHeader('Accept-Ranges', 'bytes');
-      
-      // Stream the file
-      const readStream = require('fs').createReadStream(videoPath);
-      
-      readStream.on('error', (streamError) => {
-        console.error(`❌ Stream error: ${streamError.message}`);
-        if (!res.headersSent) {
-          res.status(500).json({
-            success: false,
-            error: 'Error streaming video file',
-            details: streamError.message
-          });
-        }
-      });
-      
-      readStream.pipe(res);
-      
-    } catch (fileError) {
-      console.error(`❌ Video file not accessible: ${videoPath}`, fileError);
-      return res.status(404).json({
-        success: false,
-        error: 'Video file not found on disk',
-        sessionId,
-        expectedPath: videoPath,
-        details: fileError.message
-      });
-    }
-    
-  } catch (error) {
-    console.error('❌ Error serving video:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Internal server error',
-      details: error.message
-    });
-  }
-});
-
-/**
- * Validate chunk file integrity
+ * Validate chunk file integrity and get metadata
  */
 async function validateChunkFile(chunkPath) {
   try {
@@ -1198,37 +111,197 @@ async function validateChunkFile(chunkPath) {
     const stats = await fs.stat(chunkPath);
     
     if (stats.size === 0) {
-      return { valid: false, reason: 'File is empty' };
+      return { isValid: false, error: 'File is empty' };
     }
     
     if (stats.size < 100) {
-      return { valid: false, reason: `File too small (${stats.size} bytes)` };
+      return { isValid: false, error: `File too small (${stats.size} bytes)` };
     }
     
     // Read file header for format validation
-    const buffer = Buffer.alloc(128); // Read more bytes for better detection
+    const buffer = Buffer.alloc(128);
     const fileHandle = await fs.open(chunkPath, 'r');
     
     try {
-      const { bytesRead } = await fileHandle.read(buffer, 0, 128, 0);
+      await fileHandle.read(buffer, 0, 128, 0);
+    } finally {
+      await fileHandle.close();
+    }
+    
+    // Check for WebM signature
+    const isWebM = buffer.slice(0, 4).toString('hex') === '1a45dfa3';
+    
+    if (!isWebM) {
+      return { 
+        isValid: false, 
+        error: 'Not a valid WebM file (missing EBML header)' 
+      };
+    }
+    
+    // Use ffprobe to get detailed metadata
+    const ffprobe = require('fluent-ffmpeg').ffprobe;
+    const metadata = await new Promise((resolve, reject) => {
+      ffprobe(chunkPath, (err, data) => {
+        if (err) reject(err);
+        else resolve(data);
+      });
+    });
+    
+    const videoStream = metadata.streams.find(s => s.codec_type === 'video');
+    
+    if (!videoStream) {
+      return { 
+        isValid: false, 
+        error: 'No video stream found in file' 
+      };
+    }
+    
+    return {
+      isValid: true,
+      duration: parseFloat(metadata.format.duration) || 0,
+      format: metadata.format.format_name || 'unknown',
+      codec: videoStream.codec_name || 'unknown',
+      resolution: `${videoStream.width}x${videoStream.height}`,
+      bitrate: parseInt(metadata.format.bit_rate) || 0,
+      size: stats.size
+    };
+    
+  } catch (error) {
+    return { 
+      isValid: false, 
+      error: `Validation failed: ${error.message}` 
+    };
+  }
+}
+
+/**
+ * Enhanced video merging with accurate duration handling
+ */
+/**
+ * Wait for chunks to arrive with retry mechanism
+ * Handles race condition where finalize is called before all chunks arrive
+ */
+async function waitForChunks(sessionId, expectedChunks, maxWaitSeconds = 30) {
+  const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
+  const chunksDir = path.join(sessionsDir, sessionId, 'chunks');
+  
+  console.log(`⏳ Waiting for chunks: ${expectedChunks} expected, max wait: ${maxWaitSeconds}s`);
+  
+  const startTime = Date.now();
+  const checkInterval = 1000; // Check every 1 second
+  let attempts = 0;
+  const maxAttempts = Math.ceil(maxWaitSeconds * 1000 / checkInterval);
+  
+  while (attempts < maxAttempts) {
+    try {
+      // Check current chunk count
+      const files = await fs.readdir(chunksDir);
+      const webmFiles = files.filter(file => file.endsWith('.webm'));
+      const currentCount = webmFiles.length;
       
-      if (bytesRead < 32) {
-        return { valid: false, reason: 'Cannot read file header' };
+      console.log(`🔍 Attempt ${attempts + 1}: Found ${currentCount}/${expectedChunks} chunks`);
+      
+      if (currentCount >= expectedChunks) {
+        const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
+        console.log(`✅ All chunks ready after ${elapsedSeconds}s`);
+        return {
+          success: true,
+          actualChunks: currentCount,
+          expectedChunks: expectedChunks,
+          waitTimeSeconds: parseFloat(elapsedSeconds)
+        };
       }
       
-      // WebM validation - look for EBML header
-      const ebmlSignature = Buffer.from([0x1A, 0x45, 0xDF, 0xA3]);
-      const hasEBML = buffer.indexOf(ebmlSignature) !== -1;
+      // Show progress every 5 seconds
+      if (attempts % 5 === 0 && attempts > 0) {
+        const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
+        console.log(`⌛ Still waiting... ${currentCount}/${expectedChunks} chunks after ${elapsedSeconds}s`);
+      }
       
-      // Also check for 'webm' string in the file
-      const hasWebMString = buffer.toString('ascii').toLowerCase().includes('webm');
+      attempts++;
+      await new Promise(resolve => setTimeout(resolve, checkInterval));
       
-      // Alternative: Check for Matroska signatures (WebM is based on Matroska)
-      const matroskaSignature = Buffer.from([0x42, 0x86]); // DocType element
-      const hasMatroska = buffer.indexOf(matroskaSignature) !== -1;
+    } catch (error) {
+      console.warn(`⚠️  Error checking chunks: ${error.message}`);
       
-      if (hasEBML || hasWebMString || hasMatroska) {
-        // Additional validation with FFprobe
+      // If directory doesn't exist, return early
+      if (error.code === 'ENOENT') {
+        return {
+          success: false,
+          actualChunks: 0,
+          expectedChunks: expectedChunks,
+          message: 'Chunks directory not found'
+        };
+      }
+      
+      attempts++;
+      await new Promise(resolve => setTimeout(resolve, checkInterval));
+    }
+  }
+  
+  // Timeout reached - get final count
+  try {
+    const files = await fs.readdir(chunksDir);
+    const webmFiles = files.filter(file => file.endsWith('.webm'));
+    const finalCount = webmFiles.length;
+    
+    const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`⏰ Timeout reached after ${elapsedSeconds}s: ${finalCount}/${expectedChunks} chunks`);
+    
+    return {
+      success: finalCount >= expectedChunks,
+      actualChunks: finalCount,
+      expectedChunks: expectedChunks,
+      message: `Timeout: Only ${finalCount}/${expectedChunks} chunks received after ${elapsedSeconds}s`,
+      waitTimeSeconds: parseFloat(elapsedSeconds)
+    };
+    
+  } catch (error) {
+    return {
+      success: false,
+      actualChunks: 0,
+      expectedChunks: expectedChunks,
+      message: `Error during final chunk count: ${error.message}`
+    };
+  }
+}
+
+/**
+ * Enhanced merge function with WebM duration fixes
+ * Addresses specific WebM timestamp and duration issues
+ */
+async function mergeVideoChunksWithWebMFix(sessionId, sessionData) {
+  try {
+    const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
+    const sessionDir = path.join(sessionsDir, sessionId);
+    const chunksDir = path.join(sessionDir, 'chunks');
+    const outputPath = path.join(sessionDir, `${sessionId}_final.mp4`);
+    
+    console.log(`🎬 Starting WebM-optimized merge for session: ${sessionId}`);
+    console.log(`📁 Chunks directory: ${chunksDir}`);
+    console.log(`📤 Output file: ${outputPath}`);
+    
+    // Validate and analyze chunk files
+    const chunkFiles = [];
+    let totalExpectedDuration = 0;
+    let hasTimestampIssues = false;
+    
+    for (const chunk of sessionData.chunks) {
+      const chunkPath = path.join(chunksDir, chunk.filename);
+      
+      try {
+        await fs.access(chunkPath);
+        const stats = await fs.stat(chunkPath);
+        
+        if (stats.size < 1000) { // Minimum 1KB for valid WebM
+          console.warn(`⚠️  Chunk ${chunk.chunkIndex} too small: ${stats.size} bytes, skipping`);
+          continue;
+        }
+        
+        console.log(`📋 Analyzing WebM chunk ${chunk.chunkIndex}: ${chunk.filename}`);
+        
+        // Get detailed WebM info with ffprobe
+        let chunkInfo = {};
         try {
           const ffprobe = require('fluent-ffmpeg').ffprobe;
           const metadata = await new Promise((resolve, reject) => {
@@ -1238,76 +311,209 @@ async function validateChunkFile(chunkPath) {
             });
           });
           
-          if (!metadata.format || !metadata.streams || metadata.streams.length === 0) {
-            return { valid: false, reason: 'No valid streams found by FFprobe' };
-          }
-          
-          const videoStream = metadata.streams.find(s => s.codec_type === 'video');
-          if (!videoStream) {
-            return { valid: false, reason: 'No video stream found' };
-          }
-          
-          return {
-            valid: true,
-            metadata: {
-              duration: parseFloat(metadata.format.duration) || 0,
-              size: stats.size,
-              format: metadata.format.format_name,
-              codec: videoStream.codec_name,
-              resolution: `${videoStream.width}x${videoStream.height}`,
-              fps: eval(videoStream.avg_frame_rate) || 'unknown'
-            }
+          chunkInfo = {
+            duration: parseFloat(metadata.format.duration) || 0,
+            startTime: parseFloat(metadata.format.start_time) || 0,
+            bitrate: parseInt(metadata.format.bit_rate) || 0,
+            hasVideo: metadata.streams.some(s => s.codec_type === 'video'),
+            videoCodec: metadata.streams.find(s => s.codec_type === 'video')?.codec_name || 'unknown',
+            resolution: metadata.streams.find(s => s.codec_type === 'video') ? 
+              `${metadata.streams.find(s => s.codec_type === 'video').width}x${metadata.streams.find(s => s.codec_type === 'video').height}` : 'unknown'
           };
           
-        } catch (ffprobeError) {
-          return { 
-            valid: false, 
-            reason: `FFprobe validation failed: ${ffprobeError.message}`,
-            suggestedAction: 'File may be corrupted or incomplete'
+          // Check for timestamp issues common in WebM
+          if (chunkInfo.startTime < 0 || (chunkInfo.startTime > 0 && chunk.chunkIndex === 0)) {
+            hasTimestampIssues = true;
+            console.log(`⚠️  Timestamp issue detected in chunk ${chunk.chunkIndex}: start_time=${chunkInfo.startTime}`);
+          }
+          
+        } catch (probeError) {
+          console.warn(`⚠️  Could not probe chunk ${chunk.chunkIndex}: ${probeError.message}`);
+          chunkInfo = {
+            duration: 0,
+            startTime: 0,
+            bitrate: 0,
+            hasVideo: true,
+            videoCodec: 'webm',
+            resolution: 'unknown'
           };
         }
         
-      } else {
-        // Try to identify what kind of file this actually is
-        const header = buffer.slice(0, 16);
-        let fileType = 'unknown';
+        totalExpectedDuration += chunkInfo.duration;
         
-        if (header.slice(0, 4).toString('ascii') === 'ftyp') {
-          fileType = 'MP4';
-        } else if (header.slice(0, 3).toString('ascii') === 'GIF') {
-          fileType = 'GIF';
-        } else if (header.slice(0, 2).toString('hex') === 'ffd8') {
-          fileType = 'JPEG';
-        } else if (header.slice(0, 8).toString('ascii').includes('PNG')) {
-          fileType = 'PNG';
-        } else if (header.slice(0, 4).toString('ascii') === 'RIFF') {
-          fileType = 'AVI or WAV';
-        }
+        chunkFiles.push({
+          index: chunk.chunkIndex,
+          path: chunkPath,
+          filename: chunk.filename,
+          size: stats.size,
+          ...chunkInfo
+        });
         
-        return {
-          valid: false,
-          reason: `Not a valid WebM file. Detected format: ${fileType}`,
-          headerHex: header.toString('hex'),
-          headerAscii: header.toString('ascii').replace(/[^\x20-\x7E]/g, '.')
-        };
+        console.log(`✅ Chunk ${chunk.chunkIndex}: ${chunkInfo.videoCodec} ${chunkInfo.resolution} (${chunkInfo.duration.toFixed(2)}s)`);
+        
+      } catch (error) {
+        console.warn(`⚠️  Error processing chunk ${chunk.chunkIndex}: ${error.message}`);
       }
-      
-    } finally {
-      await fileHandle.close();
     }
     
+    if (chunkFiles.length === 0) {
+      throw new Error('No valid WebM chunk files found after analysis');
+    }
+    
+    // Sort by index
+    chunkFiles.sort((a, b) => a.index - b.index);
+    
+    console.log(`📊 WebM Analysis Summary:`);
+    console.log(`   Valid chunks: ${chunkFiles.length}/${sessionData.chunks.length}`);
+    console.log(`   Expected duration: ${totalExpectedDuration.toFixed(2)}s`);
+    console.log(`   Total size: ${(chunkFiles.reduce((sum, f) => sum + f.size, 0) / 1024 / 1024).toFixed(2)}MB`);
+    console.log(`   Timestamp issues: ${hasTimestampIssues ? 'YES (will fix)' : 'NO'}`);
+    
+    // Use optimized FFmpeg strategy for WebM
+    return new Promise((resolve, reject) => {
+      const startTime = Date.now();
+      
+      const ffmpegCommand = ffmpeg();
+      
+      // Add all inputs
+      chunkFiles.forEach((chunk) => {
+        ffmpegCommand.input(chunk.path);
+      });
+      
+      // WebM-optimized concat strategy
+      const concatFilter = {
+        filter: 'concat',
+        options: {
+          n: chunkFiles.length,
+          v: 1,
+          a: 0,
+          unsafe: 1  // Allow different timestamps/formats
+        },
+        inputs: chunkFiles.map((_, index) => `${index}:v`),
+        outputs: 'concatenated'
+      };
+      
+      // Add timestamp fixing filter if needed
+      if (hasTimestampIssues) {
+        console.log(`🔧 Applying WebM timestamp fixes...`);
+        ffmpegCommand
+          .complexFilter([
+            concatFilter,
+            // Fix timestamp discontinuities
+            {
+              filter: 'setpts',
+              options: 'PTS-STARTPTS', // Reset PTS to start from 0
+              inputs: '[concatenated]',
+              outputs: 'fixed_pts'
+            }
+          ])
+          .outputOptions([
+            '-map', '[fixed_pts]',
+            '-c:v', 'libx264',
+            '-preset', 'medium',
+            '-crf', '23',
+            '-pix_fmt', 'yuv420p',
+            '-movflags', 'faststart',
+            '-vsync', 'cfr',              // Force constant frame rate
+            '-r', '30',                   // Explicit frame rate
+            '-avoid_negative_ts', 'make_zero',
+            '-fflags', '+genpts',         // Generate new PTS
+            '-max_muxing_queue_size', '9999'
+          ]);
+      } else {
+        console.log(`🚀 Using standard WebM concatenation (no timestamp issues)...`);
+        ffmpegCommand
+          .complexFilter([concatFilter])
+          .outputOptions([
+            '-map', '[concatenated]',
+            '-c:v', 'libx264',
+            '-preset', 'medium',
+            '-crf', '23',
+            '-pix_fmt', 'yuv420p',
+            '-movflags', 'faststart',
+            '-vsync', 'cfr',
+            '-avoid_negative_ts', 'make_zero',
+            '-fflags', '+genpts',
+            '-max_muxing_queue_size', '9999'
+          ]);
+      }
+      
+      ffmpegCommand
+        .output(outputPath)
+        .on('start', (commandLine) => {
+          console.log(`🚀 FFmpeg started with WebM optimization`);
+          console.log(`   Expected duration: ${totalExpectedDuration.toFixed(2)}s`);
+          console.log(`   Timestamp fixes: ${hasTimestampIssues ? 'enabled' : 'disabled'}`);
+        })
+        .on('progress', (progress) => {
+          if (progress.percent) {
+            console.log(`⏳ Progress: ${Math.round(progress.percent)}% (${progress.timemark || 'N/A'})`);
+          }
+        })
+        .on('end', async () => {
+          const endTime = Date.now();
+          const processingTime = ((endTime - startTime) / 1000).toFixed(2);
+          
+          try {
+            const stats = await fs.stat(outputPath);
+            const sizeMB = (stats.size / 1024 / 1024).toFixed(2);
+            
+            // Verify actual duration
+            let actualDuration = 0;
+            try {
+              const ffprobe = require('fluent-ffmpeg').ffprobe;
+              const metadata = await new Promise((resolve, reject) => {
+                ffprobe(outputPath, (err, data) => {
+                  if (err) reject(err);
+                  else resolve(data);
+                });
+              });
+              actualDuration = parseFloat(metadata.format.duration) || 0;
+            } catch (probeError) {
+              console.warn(`⚠️  Could not verify final duration: ${probeError.message}`);
+            }
+            
+            console.log(`✅ WebM merge completed in ${processingTime}s`);
+            console.log(`📊 Final video: ${sizeMB}MB`);
+            console.log(`⏱️  Expected: ${totalExpectedDuration.toFixed(2)}s, Actual: ${actualDuration.toFixed(2)}s`);
+            
+            const durationDiff = Math.abs(actualDuration - totalExpectedDuration);
+            if (durationDiff > 2) {
+              console.log(`⚠️  Duration difference: ${durationDiff.toFixed(2)}s (may indicate missing chunks)`);
+            } else {
+              console.log(`✅ Duration accuracy: ${durationDiff.toFixed(2)}s difference`);
+            }
+            
+            resolve({
+              success: true,
+              outputPath,
+              sizeMB: parseFloat(sizeMB),
+              duration: parseFloat(processingTime),
+              chunksProcessed: chunkFiles.length,
+              expectedDuration: totalExpectedDuration,
+              actualDuration: actualDuration,
+              timestampFixed: hasTimestampIssues,
+              durationAccuracy: durationDiff < 2 ? 'good' : 'poor'
+            });
+            
+          } catch (statError) {
+            reject(new Error(`Failed to verify output: ${statError.message}`));
+          }
+        })
+        .on('error', (error) => {
+          console.error(`❌ FFmpeg error: ${error.message}`);
+          console.error(`📊 Context: ${chunkFiles.length} WebM chunks, expected ${totalExpectedDuration.toFixed(2)}s`);
+          reject(new Error(`WebM merge failed: ${error.message}`));
+        })
+        .run();
+    });
+    
   } catch (error) {
-    return { 
-      valid: false, 
-      reason: `Validation error: ${error.message}` 
-    };
+    console.error(`❌ Error in mergeVideoChunksWithWebMFix: ${error.message}`);
+    throw error;
   }
 }
 
-/**
- * Merge video chunks using FFmpeg
- * Combines WebM chunks into a single MP4 file
- */
 async function mergeVideoChunks(sessionId, sessionData) {
   try {
     const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
@@ -1319,247 +525,162 @@ async function mergeVideoChunks(sessionId, sessionData) {
     console.log(`📁 Chunks directory: ${chunksDir}`);
     console.log(`📤 Output file: ${outputPath}`);
     
-    // Check if chunks directory exists
-    try {
-      await fs.access(chunksDir);
-    } catch (error) {
-      throw new Error(`Chunks directory not found: ${chunksDir}`);
-    }
-    
-    // Get all chunk files and validate them thoroughly
+    // Validate chunk files exist and get their info
     const chunkFiles = [];
-    const validationResults = [];
-    
-    console.log(`🔍 Validating ${sessionData.chunks.length} chunk files...`);
+    let totalExpectedDuration = 0;
     
     for (const chunk of sessionData.chunks) {
       const chunkPath = path.join(chunksDir, chunk.filename);
       
       try {
         await fs.access(chunkPath);
+        const stats = await fs.stat(chunkPath);
         
-        console.log(`🔍 Validating chunk ${chunk.chunkIndex}: ${chunk.filename}`);
-        const validation = await validateChunkFile(chunkPath);
-        validationResults.push({ chunk, validation });
+        if (stats.size < 100) {
+          console.warn(`⚠️  Chunk ${chunk.chunkIndex} too small: ${stats.size} bytes`);
+          continue;
+        }
         
-        if (validation.valid) {
+        console.log(`📋 Validating chunk ${chunk.chunkIndex}: ${chunk.filename}`);
+        const validationResult = await validateChunkFile(chunkPath);
+        
+        if (validationResult.isValid) {
+          const duration = validationResult.duration || 0;
+          totalExpectedDuration += duration;
+          
           chunkFiles.push({
             index: chunk.chunkIndex,
             path: chunkPath,
             filename: chunk.filename,
-            size: validation.metadata.size,
-            duration: validation.metadata.duration,
-            format: validation.metadata.format,
-            codec: validation.metadata.codec,
-            resolution: validation.metadata.resolution
+            size: stats.size,
+            duration: duration,
+            format: validationResult.format,
+            codec: validationResult.codec,
+            resolution: validationResult.resolution
           });
           
-          console.log(`✅ Chunk ${chunk.chunkIndex} valid: ${validation.metadata.format}, ${validation.metadata.duration}s, ${validation.metadata.resolution}`);
-          
+          console.log(`✅ Chunk ${chunk.chunkIndex}: ${validationResult.format} ${validationResult.resolution} (${duration.toFixed(2)}s, ${(stats.size / 1024 / 1024).toFixed(2)}MB)`);
         } else {
-          console.error(`❌ Chunk ${chunk.chunkIndex} invalid: ${validation.reason}`);
-          if (validation.suggestedAction) {
-            console.error(`   💡 Suggestion: ${validation.suggestedAction}`);
-          }
-          if (validation.headerHex) {
-            console.error(`   📋 File header: ${validation.headerHex}`);
-          }
+          console.warn(`❌ Chunk ${chunk.chunkIndex} validation failed: ${validationResult.error}`);
         }
         
       } catch (error) {
-        console.error(`❌ Cannot access chunk file: ${chunkPath} - ${error.message}`);
-        validationResults.push({ 
-          chunk, 
-          validation: { valid: false, reason: `File access error: ${error.message}` } 
-        });
+        console.warn(`⚠️  Error accessing chunk ${chunk.chunkIndex}: ${error.message}`);
       }
-    }
-    
-    // Report validation summary
-    const validChunks = validationResults.filter(r => r.validation.valid).length;
-    const invalidChunks = validationResults.filter(r => !r.validation.valid).length;
-    
-    console.log(`📊 Validation Summary:`);
-    console.log(`   ✅ Valid chunks: ${validChunks}/${sessionData.chunks.length}`);
-    console.log(`   ❌ Invalid chunks: ${invalidChunks}/${sessionData.chunks.length}`);
-    
-    if (invalidChunks > 0) {
-      console.log(`� Invalid chunk details:`);
-      validationResults
-        .filter(r => !r.validation.valid)
-        .forEach(r => {
-          console.log(`   - ${r.chunk.filename}: ${r.validation.reason}`);
-        });
     }
     
     if (chunkFiles.length === 0) {
-      const errorMsg = `No valid chunk files found. Validation results:
-${validationResults.map(r => `  - ${r.chunk.filename}: ${r.validation.valid ? 'OK' : r.validation.reason}`).join('\n')}
-
-This usually indicates:
-1. Recording process created invalid or corrupted WebM files
-2. Files were modified or truncated after creation
-3. Network transfer corrupted the files
-4. Disk space issues during recording
-
-Suggestion: Check the recording process and ensure WebM chunks are properly created.`;
-      
-      throw new Error(errorMsg);
+      throw new Error('No valid chunk files found');
     }
     
-    console.log(`📊 Processing Summary:`);
-    console.log(`   Total valid chunks: ${chunkFiles.length}`);
-    console.log(`   Total duration: ${chunkFiles.reduce((sum, f) => sum + f.duration, 0).toFixed(2)}s`);
-    console.log(`   Total size: ${(chunkFiles.reduce((sum, f) => sum + f.size, 0) / 1024 / 1024).toFixed(2)}MB`);
-    console.log(`   Formats: ${[...new Set(chunkFiles.map(f => f.format))].join(', ')}`);
-    console.log(`   Codecs: ${[...new Set(chunkFiles.map(f => f.codec))].join(', ')}`);
-    console.log(`   Resolutions: ${[...new Set(chunkFiles.map(f => f.resolution))].join(', ')}`);
-    
-    // Sort chunks by index
+    // Sort by index
     chunkFiles.sort((a, b) => a.index - b.index);
-    console.log(`🔢 Merging ${chunkFiles.length} validated chunks in order`);
     
-    // Create a file list for FFmpeg concat demuxer (much simpler for many files)
-    const fileListPath = path.join(sessionDir, 'filelist.txt');
-    const fileListContent = chunkFiles
-      .map(chunk => {
-        // Use relative paths to avoid issues with spaces and long paths
-        const relativePath = path.relative(sessionDir, chunk.path);
-        return `file '${relativePath}'`;
-      })
-      .join('\n');
+    console.log(`📊 Processing ${chunkFiles.length}/${sessionData.chunks.length} valid chunks`);
+    console.log(`⏱️  Expected total duration: ${totalExpectedDuration.toFixed(2)}s`);
+    console.log(`📦 Total size: ${(chunkFiles.reduce((sum, f) => sum + f.size, 0) / 1024 / 1024).toFixed(2)}MB`);
     
-    await fs.writeFile(fileListPath, fileListContent, 'utf8');
-    console.log(`📝 Created file list: ${fileListPath}`);
-    console.log(`📋 File list content (${chunkFiles.length} entries):`);
-    console.log(fileListContent.split('\n').slice(0, 5).join('\n')); // Show first 5 entries
-    if (chunkFiles.length > 5) {
-      console.log(`   ... and ${chunkFiles.length - 5} more entries`);
-    }
-    
-    // Use FFmpeg concat demuxer with enhanced error handling
+    // Use filter_complex for proper concatenation with accurate duration
     return new Promise((resolve, reject) => {
       const startTime = Date.now();
       
-      console.log(`🔧 Using concat demuxer for ${chunkFiles.length} chunks (much more efficient)`);
+      const ffmpegCommand = ffmpeg();
       
-      const ffmpegCommand = ffmpeg()
-        .input(fileListPath)
-        .inputOptions([
-          '-f', 'concat',           // Use concat demuxer
-          '-safe', '0',             // Allow relative paths
-          '-protocol_whitelist', 'file,pipe'  // Security whitelist
-        ]);
-        
-      // Choose encoding strategy based on validation results
-      const allSameFormat = [...new Set(chunkFiles.map(f => f.format))].length === 1;
-      const allSameCodec = [...new Set(chunkFiles.map(f => f.codec))].length === 1;
-      const allSameResolution = [...new Set(chunkFiles.map(f => f.resolution))].length === 1;
+      // Add all inputs
+      chunkFiles.forEach((chunk) => {
+        ffmpegCommand.input(chunk.path);
+      });
       
-      if (allSameFormat && allSameCodec && allSameResolution) {
-        console.log(`🚀 All chunks have identical format/codec/resolution - using stream copy for speed`);
-        ffmpegCommand.outputOptions([
-          '-c', 'copy',                    // Copy streams without re-encoding
-          '-avoid_negative_ts', 'make_zero', // Handle timestamp issues
-          '-fflags', '+genpts'            // Generate presentation timestamps
-        ]);
-      } else {
-        console.log(`🔄 Mixed formats/codecs detected - re-encoding for compatibility`);
-        console.log(`   Formats: ${[...new Set(chunkFiles.map(f => f.format))].join(', ')}`);
-        console.log(`   Codecs: ${[...new Set(chunkFiles.map(f => f.codec))].join(', ')}`);
-        console.log(`   Resolutions: ${[...new Set(chunkFiles.map(f => f.resolution))].join(', ')}`);
-        
-        ffmpegCommand.outputOptions([
-          '-c:v', 'libx264',           // Re-encode to H.264
-          '-preset', 'medium',         // Balance speed vs compression
-          '-crf', '23',               // Good quality
-          '-pix_fmt', 'yuv420p',      // Compatibility
-          '-movflags', 'faststart',   // Web optimization
-          '-avoid_negative_ts', 'make_zero'
-        ]);
-      }
-      
+      // Create concat filter with proper options for duration accuracy
       ffmpegCommand
+        .complexFilter([
+          {
+            filter: 'concat',
+            options: {
+              n: chunkFiles.length,
+              v: 1,
+              a: 0,
+              unsafe: 1  // Allow different formats/timestamps
+            },
+            inputs: chunkFiles.map((_, index) => `${index}:v`),
+            outputs: 'concatenated'
+          }
+        ])
+        .outputOptions([
+          '-map', '[concatenated]',
+          '-c:v', 'libx264',
+          '-preset', 'medium',
+          '-crf', '23',
+          '-pix_fmt', 'yuv420p',
+          '-movflags', 'faststart',
+          '-vsync', 'cfr',              // Constant frame rate for duration accuracy
+          '-avoid_negative_ts', 'make_zero',
+          '-fflags', '+genpts',         // Generate presentation timestamps
+          '-max_muxing_queue_size', '9999'
+        ])
         .output(outputPath)
         .on('start', (commandLine) => {
-          console.log(`🚀 FFmpeg started: ${commandLine}`);
-          console.log(`📁 Output path: ${outputPath}`);
-        })
-        .on('stderr', (stderrLine) => {
-          console.log(`FFmpeg stderr: ${stderrLine}`);
+          console.log(`🚀 FFmpeg started with filter_complex`);
+          console.log(`   Expected duration: ${totalExpectedDuration.toFixed(2)}s`);
         })
         .on('progress', (progress) => {
           if (progress.percent) {
-            console.log(`⏳ FFmpeg progress: ${Math.round(progress.percent)}% (${progress.timemark})`);
+            console.log(`⏳ Progress: ${Math.round(progress.percent)}% (${progress.timemark || 'N/A'})`);
           }
         })
         .on('end', async () => {
           const endTime = Date.now();
-          const duration = ((endTime - startTime) / 1000).toFixed(2);
-          console.log(`✅ Video merge completed in ${duration}s`);
+          const processingTime = ((endTime - startTime) / 1000).toFixed(2);
           
           try {
-            // Check output file
             const stats = await fs.stat(outputPath);
             const sizeMB = (stats.size / 1024 / 1024).toFixed(2);
-            console.log(`📊 Final video size: ${sizeMB}MB`);
-            console.log(`✅ Successfully merged ${chunkFiles.length} WebM chunks into single MP4 file`);
             
-            // Clean up temporary file list
+            // Verify actual duration
+            let actualDuration = 0;
             try {
-              await fs.unlink(fileListPath);
-              console.log(`🗑️  Removed temporary file list: ${fileListPath}`);
-            } catch (cleanupError) {
-              console.warn(`⚠️  Could not remove file list: ${cleanupError.message}`);
+              const ffprobe = require('fluent-ffmpeg').ffprobe;
+              const metadata = await new Promise((resolve, reject) => {
+                ffprobe(outputPath, (err, data) => {
+                  if (err) reject(err);
+                  else resolve(data);
+                });
+              });
+              actualDuration = parseFloat(metadata.format.duration) || 0;
+            } catch (probeError) {
+              console.warn(`⚠️  Could not verify final duration: ${probeError.message}`);
+            }
+            
+            console.log(`✅ Video merge completed in ${processingTime}s`);
+            console.log(`📊 Final video: ${sizeMB}MB`);
+            console.log(`⏱️  Expected: ${totalExpectedDuration.toFixed(2)}s, Actual: ${actualDuration.toFixed(2)}s`);
+            
+            const durationDiff = Math.abs(actualDuration - totalExpectedDuration);
+            if (durationDiff > 2) {
+              console.log(`⚠️  Significant duration difference: ${durationDiff.toFixed(2)}s`);
+              console.log(`   This might indicate timing issues with some chunks`);
+            } else {
+              console.log(`✅ Duration verification passed (diff: ${durationDiff.toFixed(2)}s)`);
             }
             
             resolve({
               success: true,
               outputPath,
               sizeMB: parseFloat(sizeMB),
-              duration: parseFloat(duration),
-              chunksProcessed: chunkFiles.length
+              duration: parseFloat(processingTime),
+              chunksProcessed: chunkFiles.length,
+              expectedDuration: totalExpectedDuration,
+              actualDuration: actualDuration
             });
             
           } catch (statError) {
-            reject(new Error(`Failed to verify output file: ${statError.message}`));
+            reject(new Error(`Failed to verify output: ${statError.message}`));
           }
         })
         .on('error', (error) => {
           console.error(`❌ FFmpeg error: ${error.message}`);
-          console.error(`📊 Error context:`);
-          console.error(`   Session: ${sessionId}`);
-          console.error(`   Chunks: ${chunkFiles.length} files`);
-          console.error(`   First chunk: ${chunkFiles[0]?.path}`);
-          console.error(`   Output: ${outputPath}`);
-          
-          // Enhanced error analysis
-          let errorDetail = error.message;
-          if (error.message.includes('Invalid data found when processing input')) {
-            errorDetail = `Invalid WebM data detected. This usually means:
-            1. Chunk files are corrupted or incomplete
-            2. Files are not valid WebM format
-            3. Files were created with incompatible settings
-            Suggestion: Check if the recording process is properly creating WebM chunks`;
-          } else if (error.message.includes('Error opening input file')) {
-            errorDetail = `Cannot open input files. This usually means:
-            1. File permissions are incorrect
-            2. Files are locked by another process
-            3. Files were moved or deleted during processing
-            Suggestion: Check file permissions and ensure files exist`;
-          } else if (error.message.includes('No such file or directory')) {
-            errorDetail = `Files not found during processing. This usually means:
-            1. Files were deleted between validation and processing
-            2. Path resolution issues
-            Suggestion: Check if files still exist at expected paths`;
-          }
-          
-          // Clean up file list on error
-          fs.unlink(fileListPath)
-            .then(() => console.log(`🗑️  Cleaned up file list after error: ${fileListPath}`))
-            .catch(() => {}); // Ignore cleanup errors
-          
-          reject(new Error(`Video merge failed: ${errorDetail}`));
+          console.error(`📊 Context: ${chunkFiles.length} chunks, expected ${totalExpectedDuration.toFixed(2)}s`);
+          reject(new Error(`Video merge failed: ${error.message}`));
         })
         .run();
     });
@@ -1589,104 +710,536 @@ async function cleanupChunkFiles(sessionId, sessionData) {
       
       try {
         const stats = await fs.stat(chunkPath);
-        await fs.unlink(chunkPath);
-        
-        deletedFiles++;
         totalSizeFreed += stats.size;
+        
+        await fs.unlink(chunkPath);
+        deletedFiles++;
+        
         console.log(`🗑️  Deleted chunk: ${chunk.filename} (${(stats.size / 1024 / 1024).toFixed(2)}MB)`);
         
       } catch (error) {
-        if (error.code === 'ENOENT') {
-          console.warn(`⚠️  Chunk file already deleted: ${chunkPath}`);
-        } else {
-          console.error(`❌ Failed to delete chunk: ${chunkPath} - ${error.message}`);
-        }
+        console.warn(`⚠️  Could not delete chunk ${chunk.filename}: ${error.message}`);
       }
     }
     
-    // Try to remove empty chunks directory
+    // Try to remove chunks directory if empty
     try {
-      const remainingFiles = await fs.readdir(chunksDir);
-      if (remainingFiles.length === 0) {
-        await fs.rmdir(chunksDir);
-        console.log(`🗑️  Removed empty chunks directory: ${chunksDir}`);
-      } else {
-        console.log(`📁 Chunks directory not empty, keeping: ${remainingFiles.length} files remaining`);
-      }
+      await fs.rmdir(chunksDir);
+      console.log(`🗑️  Removed empty chunks directory`);
     } catch (error) {
-      console.warn(`⚠️  Could not remove chunks directory: ${error.message}`);
+      // Ignore - directory might not be empty or might not exist
     }
     
-    const totalSizeFreedMB = (totalSizeFreed / 1024 / 1024).toFixed(2);
-    console.log(`✅ Cleanup completed: ${deletedFiles} files deleted, ${totalSizeFreedMB}MB freed`);
+    console.log(`✅ Cleanup completed: ${deletedFiles} files deleted, ${(totalSizeFreed / 1024 / 1024).toFixed(2)}MB freed`);
     
     return {
       deletedFiles,
-      totalSizeFreedMB: parseFloat(totalSizeFreedMB)
+      totalSizeFreed,
+      success: true
     };
     
   } catch (error) {
-    console.error(`❌ Error in cleanupChunkFiles: ${error.message}`);
-    throw error;
+    console.error(`❌ Cleanup error: ${error.message}`);
+    return {
+      deletedFiles: 0,
+      totalSizeFreed: 0,
+      success: false,
+      error: error.message
+    };
   }
 }
 
-// Utility function to calculate processing time
-function calculateProcessingTime(startTime, endTime) {
-  const start = new Date(startTime);
-  const end = new Date(endTime);
-  const durationMs = end - start;
-  const durationSeconds = Math.round(durationMs / 1000);
-  
-  if (durationSeconds < 60) {
-    return `${durationSeconds}s`;
-  } else {
-    const minutes = Math.floor(durationSeconds / 60);
-    const seconds = durationSeconds % 60;
-    return `${minutes}m ${seconds}s`;
-  }
-}
+// Routes will be added here (placeholder - need to add the actual routes from the original file)
+// This is just the essential functions for the duration fix
 
-// Cleanup old sessions periodically (run every 30 minutes)
-setInterval(async () => {
-  const now = new Date();
-  const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000); // 24 hours ago
-  
+// Initialize on first request
+router.use(async (req, res, next) => {
   try {
-    const sessionDirs = await fs.readdir(SESSIONS_DIR);
-    let cleanedSessions = 0;
+    await initializeOnce();
+    next();
+  } catch (error) {
+    console.error(`❌ Failed to initialize media recording directories: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to initialize media recording system',
+      details: error.message
+    });
+  }
+});
+
+/**
+ * Finalize recording session and merge video chunks
+ * POST /recording/finalize
+ */
+router.post('/recording/finalize', async (req, res) => {
+  console.log('🎯 Processing video finalization...');
+  try {
+    const { sessionId, totalChunks, totalSize, chunks: clientChunks, maxWaitSeconds = 30 } = req.body;
     
-    for (const sessionId of sessionDirs) {
-      try {
-        const sessionData = await loadSessionMetadata(sessionId);
-        if (sessionData) {
-          const sessionDate = new Date(sessionData.createdAt);
-          if (sessionDate < oneDayAgo) {
-            const sessionDir = path.join(SESSIONS_DIR, sessionId);
-            await fs.rm(sessionDir, { recursive: true, force: true });
-            sessions.delete(sessionId);
-            cleanedSessions++;
+    // Validate required fields
+    if (!sessionId || totalChunks === undefined) {
+      return res.status(400).json({
+        success: false,
+        error: 'sessionId and totalChunks are required'
+      });
+    }
+    
+    console.log(`🎬 Starting finalization for session: ${sessionId}`);
+    console.log(`📊 Expected: ${totalChunks} chunks, ${(totalSize / 1024 / 1024).toFixed(2)}MB`);
+    
+    const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
+    const sessionDir = path.join(sessionsDir, sessionId);
+    const chunksDir = path.join(sessionDir, 'chunks');
+    
+    // Wait for chunks to arrive with retry mechanism
+    const waitResult = await waitForChunks(sessionId, totalChunks, maxWaitSeconds);
+    
+    if (!waitResult.success) {
+      console.warn(`⚠️  Chunk waiting failed: ${waitResult.message}`);
+      console.log(`📊 Found ${waitResult.actualChunks}/${totalChunks} chunks`);
+      
+      // Option 1: Proceed with available chunks (partial merge)
+      if (waitResult.actualChunks > 0) {
+        console.log(`🔄 Proceeding with partial merge (${waitResult.actualChunks} chunks)`);
+      } else {
+        return res.status(400).json({
+          success: false,
+          error: 'No chunks available for merging',
+          details: waitResult.message,
+          sessionId
+        });
+      }
+    } else {
+      console.log(`✅ All chunks ready: ${waitResult.actualChunks}/${totalChunks}`);
+    }
+    
+    // Load session data with actual chunks found
+    let sessionData = activeSessions.get(sessionId) || {};
+    
+    try {
+      await fs.access(sessionDir);
+      console.log(`📁 Found session directory: ${sessionDir}`);
+      
+      // Get actual chunk files from directory with enhanced sorting
+      const chunkFiles = await fs.readdir(chunksDir);
+      const actualChunks = chunkFiles
+        .filter(file => file.endsWith('.webm'))
+        .map((filename) => {
+          // Extract chunk number from filename
+          const chunkMatch = filename.match(/chunk-(\d+)/) || filename.match(/(\d+)/);
+          const chunkIndex = chunkMatch ? parseInt(chunkMatch[1]) : 999999;
+          
+          return {
+            chunkIndex: chunkIndex,
+            filename: filename,
+            timestamp: Date.now()
+          };
+        })
+        .sort((a, b) => a.chunkIndex - b.chunkIndex); // Sort by actual chunk number
+      
+      sessionData = {
+        ...sessionData,
+        sessionId: sessionId,
+        status: 'finalizing',
+        chunks: actualChunks,
+        totalChunks: actualChunks.length,
+        expectedChunks: totalChunks,
+        directories: { sessionDir, chunksDir }
+      };
+      
+      console.log(`✅ Found ${actualChunks.length} chunk files (expected ${totalChunks})`);
+      
+      // Log chunk sequence for debugging
+      if (actualChunks.length < totalChunks) {
+        const foundIndices = actualChunks.map(c => c.chunkIndex).sort((a, b) => a - b);
+        const missingIndices = [];
+        for (let i = 0; i < totalChunks; i++) {
+          if (!foundIndices.includes(i)) {
+            missingIndices.push(i);
           }
         }
-      } catch (error) {
-        // Skip invalid sessions
+        console.log(`⚠️  Missing chunk indices: [${missingIndices.join(', ')}]`);
       }
+      
+    } catch (dirError) {
+      console.error(`❌ Session directory not found: ${sessionDir}`);
+      return res.status(404).json({
+        success: false,
+        error: 'Session directory not found',
+        sessionId
+      });
     }
     
-    if (cleanedSessions > 0) {
-      console.log(`🧹 Cleaned up ${cleanedSessions} old sessions`);
+    if (!sessionData.chunks || sessionData.chunks.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No chunks found to merge',
+        sessionId
+      });
     }
+    
+    console.log(`🔀 Starting video merge for ${sessionData.chunks.length} chunks...`);
+    
+    try {
+      // Use enhanced merge function that handles WebM duration issues
+      const mergeResult = await mergeVideoChunksWithWebMFix(sessionId, sessionData);
+      
+      console.log(`✅ Video merge completed successfully!`);
+      console.log(`📊 Final video: ${mergeResult.sizeMB}MB, ${mergeResult.actualDuration.toFixed(2)}s`);
+      console.log(`⏱️  Expected vs Actual duration: ${mergeResult.expectedDuration.toFixed(2)}s vs ${mergeResult.actualDuration.toFixed(2)}s`);
+      
+      // Update session data
+      sessionData.status = 'completed';
+      sessionData.finalizedAt = new Date().toISOString();
+      sessionData.mergeResult = mergeResult;
+      activeSessions.set(sessionId, sessionData);
+      
+      // Optionally cleanup chunks after successful merge
+      const cleanup = await cleanupChunkFiles(sessionId, sessionData);
+      
+      res.json({
+        success: true,
+        sessionId: sessionId,
+        message: 'Video finalized and merged successfully',
+        warnings: sessionData.chunks.length < totalChunks ? [`Only ${sessionData.chunks.length}/${totalChunks} chunks were available`] : [],
+        video: {
+          filename: `${sessionId}_final.mp4`,
+          sizeMB: mergeResult.sizeMB,
+          expectedDuration: mergeResult.expectedDuration,
+          actualDuration: mergeResult.actualDuration,
+          durationAccuracy: Math.abs(mergeResult.actualDuration - mergeResult.expectedDuration) < 2 ? 'good' : 'poor',
+          chunksProcessed: mergeResult.chunksProcessed
+        },
+        cleanup: cleanup
+      });
+      
+    } catch (mergeError) {
+      console.error(`❌ Video merge failed: ${mergeError.message}`);
+      
+      res.status(500).json({
+        success: false,
+        error: 'Video merge failed',
+        details: mergeError.message,
+        sessionId
+      });
+    }
+    
   } catch (error) {
-    console.error('❌ Error during session cleanup:', error);
+    console.error(`❌ Finalization error: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      error: 'Finalization failed',
+      details: error.message
+    });
   }
-}, 30 * 60 * 1000); // 30 minutes
+});
 
-console.log('📡 Media recording routes initialized:');
-console.log('  - POST /recording/init');
-console.log('  - POST /recording/chunk');
-console.log('  - POST /recording/finalize');
-console.log('  - GET  /recording/session/:sessionId');
-console.log('  - GET  /recording/sessions');
-console.log('  - DELETE /recording/session/:sessionId');
+/**
+ * Get session video file
+ * GET /session/:sessionId/video
+ */
+router.get('/session/:sessionId/video', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
+    const videoPath = path.join(sessionsDir, sessionId, `${sessionId}_final.mp4`);
+    
+    // Check if video file exists
+    try {
+      await fs.access(videoPath);
+    } catch (error) {
+      return res.status(404).json({
+        success: false,
+        error: 'Video file not found',
+        sessionId
+      });
+    }
+    
+    // Get file stats for headers
+    const stats = await fs.stat(videoPath);
+    
+    // Set appropriate headers
+    res.set({
+      'Content-Type': 'video/mp4',
+      'Content-Length': stats.size,
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'public, max-age=86400' // Cache for 1 day
+    });
+    
+    // Stream the video file
+    const videoStream = require('fs').createReadStream(videoPath);
+    videoStream.pipe(res);
+    
+  } catch (error) {
+    console.error(`❌ Error serving video: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to serve video file',
+      details: error.message
+    });
+  }
+});
+
+/**
+ * Check chunks status for a session (useful for debugging race conditions)
+ * GET /session/:sessionId/chunks/status
+ */
+router.get('/session/:sessionId/chunks/status', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const { expectedChunks } = req.query;
+    
+    const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
+    const chunksDir = path.join(sessionsDir, sessionId, 'chunks');
+    
+    try {
+      // Get current chunks
+      const files = await fs.readdir(chunksDir);
+      const webmFiles = files.filter(file => file.endsWith('.webm'));
+      
+      // Analyze chunk details
+      const chunkDetails = [];
+      for (const filename of webmFiles) {
+        const filePath = path.join(chunksDir, filename);
+        const stats = await fs.stat(filePath);
+        
+        // Extract chunk number
+        const chunkMatch = filename.match(/chunk-(\d+)/) || filename.match(/(\d+)/);
+        const chunkIndex = chunkMatch ? parseInt(chunkMatch[1]) : -1;
+        
+        chunkDetails.push({
+          filename,
+          chunkIndex,
+          sizeMB: (stats.size / 1024 / 1024).toFixed(2),
+          modifiedAt: stats.mtime.toISOString()
+        });
+      }
+      
+      // Sort by chunk index
+      chunkDetails.sort((a, b) => a.chunkIndex - b.chunkIndex);
+      
+      // Find missing chunks if expected count is provided
+      let missingChunks = [];
+      if (expectedChunks) {
+        const expectedCount = parseInt(expectedChunks);
+        const foundIndices = chunkDetails.map(c => c.chunkIndex).filter(i => i >= 0);
+        
+        for (let i = 0; i < expectedCount; i++) {
+          if (!foundIndices.includes(i)) {
+            missingChunks.push(i);
+          }
+        }
+      }
+      
+      const status = {
+        sessionId,
+        chunksFound: webmFiles.length,
+        expectedChunks: expectedChunks ? parseInt(expectedChunks) : null,
+        isComplete: expectedChunks ? webmFiles.length >= parseInt(expectedChunks) : null,
+        missingChunks,
+        totalSizeMB: chunkDetails.reduce((sum, c) => sum + parseFloat(c.sizeMB), 0).toFixed(2),
+        chunks: chunkDetails,
+        lastModified: chunkDetails.length > 0 ? 
+          Math.max(...chunkDetails.map(c => new Date(c.modifiedAt).getTime())) : null
+      };
+      
+      res.json(status);
+      
+    } catch (dirError) {
+      res.status(404).json({
+        success: false,
+        error: 'Session chunks directory not found',
+        sessionId
+      });
+    }
+    
+  } catch (error) {
+    console.error(`❌ Error checking chunks status: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to check chunks status',
+      details: error.message
+    });
+  }
+});
+
+/**
+ * Health check endpoint
+ * GET /status
+ */
+/**
+ * Asynchronous finalize endpoint - starts processing immediately, returns job ID
+ * POST /recording/finalize-async
+ */
+router.post('/recording/finalize-async', async (req, res) => {
+  const { sessionId, totalChunks, totalSize, chunks: clientChunks } = req.body;
+  
+  // Validate required fields
+  if (!sessionId || totalChunks === undefined) {
+    return res.status(400).json({
+      success: false,
+      error: 'sessionId and totalChunks are required'
+    });
+  }
+  
+  const jobId = `${sessionId}_${Date.now()}`;
+  
+  console.log(`🚀 Starting async finalization job: ${jobId}`);
+  
+  // Return immediately with job ID
+  res.json({
+    success: true,
+    jobId,
+    sessionId,
+    status: 'processing',
+    message: 'Finalization job started, check status with /recording/job/:jobId'
+  });
+  
+  // Process in background
+  (async () => {
+    try {
+      console.log(`🎬 Background processing for job: ${jobId}`);
+      
+      // Wait for chunks with extended timeout for async processing
+      const waitResult = await waitForChunks(sessionId, totalChunks, 60); // 60 second timeout
+      
+      if (!waitResult.success && waitResult.actualChunks === 0) {
+        console.error(`❌ Job ${jobId} failed: No chunks found`);
+        // Store job result in memory (in production, use database)
+        global.finalizationJobs = global.finalizationJobs || new Map();
+        global.finalizationJobs.set(jobId, {
+          status: 'failed',
+          error: 'No chunks found',
+          completedAt: new Date().toISOString()
+        });
+        return;
+      }
+      
+      // Load session data
+      const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
+      const sessionDir = path.join(sessionsDir, sessionId);
+      const chunksDir = path.join(sessionDir, 'chunks');
+      
+      const chunkFiles = await fs.readdir(chunksDir);
+      const actualChunks = chunkFiles
+        .filter(file => file.endsWith('.webm'))
+        .map((filename) => {
+          const chunkMatch = filename.match(/chunk-(\d+)/) || filename.match(/(\d+)/);
+          const chunkIndex = chunkMatch ? parseInt(chunkMatch[1]) : 999999;
+          return {
+            chunkIndex: chunkIndex,
+            filename: filename,
+            timestamp: Date.now()
+          };
+        })
+        .sort((a, b) => a.chunkIndex - b.chunkIndex);
+      
+      const sessionData = {
+        sessionId: sessionId,
+        status: 'finalizing',
+        chunks: actualChunks,
+        totalChunks: actualChunks.length,
+        expectedChunks: totalChunks,
+        directories: { sessionDir, chunksDir }
+      };
+      
+      // Merge video
+      const mergeResult = await mergeVideoChunksWithWebMFix(sessionId, sessionData);
+      
+      console.log(`✅ Job ${jobId} completed successfully`);
+      
+      // Store success result
+      global.finalizationJobs = global.finalizationJobs || new Map();
+      global.finalizationJobs.set(jobId, {
+        status: 'completed',
+        sessionId,
+        result: mergeResult,
+        completedAt: new Date().toISOString()
+      });
+      
+    } catch (error) {
+      console.error(`❌ Job ${jobId} failed: ${error.message}`);
+      
+      // Store error result
+      global.finalizationJobs = global.finalizationJobs || new Map();
+      global.finalizationJobs.set(jobId, {
+        status: 'failed',
+        sessionId,
+        error: error.message,
+        completedAt: new Date().toISOString()
+      });
+    }
+  })();
+});
+
+/**
+ * Check finalization job status
+ * GET /recording/job/:jobId
+ */
+router.get('/recording/job/:jobId', async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    
+    global.finalizationJobs = global.finalizationJobs || new Map();
+    const jobResult = global.finalizationJobs.get(jobId);
+    
+    if (!jobResult) {
+      return res.status(404).json({
+        success: false,
+        error: 'Job not found',
+        jobId
+      });
+    }
+    
+    res.json({
+      success: true,
+      jobId,
+      ...jobResult
+    });
+    
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get job status',
+      details: error.message
+    });
+  }
+});
+
+router.get('/status', async (req, res) => {
+  try {
+    const stats = {
+      status: 'healthy',
+      activeSessions: activeSessions.size,
+      directories: {
+        base: MEDIA_BASE_DIR,
+        sessions: SESSIONS_DIR
+      },
+      timestamp: new Date().toISOString()
+    };
+    
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      error: error.message
+    });
+  }
+});
+
+console.log('🎬 Enhanced Media Recording routes loaded:');
+console.log('  - POST /recording/finalize (synchronous with chunk waiting)');
+console.log('  - POST /recording/finalize-async (asynchronous background processing)');
+console.log('  - GET  /recording/job/:jobId (check async job status)');
+console.log('  - GET  /session/:sessionId/chunks/status (check chunks availability)');
+console.log('  - GET  /session/:sessionId/video (download final video)');
+console.log('  - GET  /status (health check)');
+console.log('');
+console.log('🔧 WebM Duration Fix Features:');
+console.log('  ✅ Chunk waiting system (prevents race conditions)');
+console.log('  ✅ WebM timestamp fixing (handles negative/discontinuous timestamps)');
+console.log('  ✅ Enhanced duration verification');
+console.log('  ✅ Async processing option (non-blocking finalization)');
+console.log('  ✅ Missing chunk detection and reporting');
 
 module.exports = router;
