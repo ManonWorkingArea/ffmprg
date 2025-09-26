@@ -1236,27 +1236,43 @@ async function mergeVideoChunks(sessionId, sessionData) {
     chunkFiles.sort((a, b) => a.index - b.index);
     console.log(`🔢 Merging ${chunkFiles.length} chunks in order`);
     
-    // Create a file list for FFmpeg concat demuxer
-    const fileListPath = path.join(sessionDir, 'filelist.txt');
-    const fileListContent = chunkFiles
-      .map(chunk => `file '${path.relative(sessionDir, chunk.path)}'`)
-      .join('\n');
-    
-    await fs.writeFile(fileListPath, fileListContent, 'utf8');
-    console.log(`📝 Created file list: ${fileListPath}`);
-    console.log(`📋 File list content:\n${fileListContent}`);
-    
-    // Use FFmpeg to merge chunks
+    // Use FFmpeg to merge chunks - Use filter_complex for proper WebM merging
     return new Promise((resolve, reject) => {
       const startTime = Date.now();
       
-      ffmpeg()
-        .input(fileListPath)
-        .inputOptions(['-f', 'concat', '-safe', '0'])
+      const ffmpegCommand = ffmpeg();
+      
+      // Add all chunk files as inputs
+      chunkFiles.forEach(chunk => {
+        ffmpegCommand.input(chunk.path);
+      });
+      
+      // Use filter_complex to concatenate video streams properly
+      const filterInputs = chunkFiles.map((_, index) => `[${index}:v]`).join('');
+      const filterComplex = `${filterInputs}concat=n=${chunkFiles.length}:v=1:a=0[outv]`;
+      
+      console.log(`🔧 FFmpeg filter: ${filterComplex}`);
+      
+      ffmpegCommand
+        .complexFilter([
+          {
+            filter: 'concat',
+            options: {
+              n: chunkFiles.length,
+              v: 1, // video streams
+              a: 0  // no audio streams (WebM chunks typically don't have audio)
+            },
+            inputs: chunkFiles.map((_, index) => `${index}:v`),
+            outputs: 'outv'
+          }
+        ])
         .outputOptions([
-          '-c', 'copy',           // Copy streams without re-encoding for speed
-          '-avoid_negative_ts', 'make_zero', // Handle timestamp issues
-          '-fflags', '+genpts'    // Generate presentation timestamps
+          '-map', '[outv]',
+          '-c:v', 'libx264',     // Re-encode to H.264 for MP4
+          '-preset', 'medium',   // Balance between speed and compression
+          '-crf', '23',          // Good quality setting
+          '-pix_fmt', 'yuv420p', // Ensure compatibility
+          '-movflags', 'faststart' // Enable fast start for web playback
         ])
         .output(outputPath)
         .on('start', (commandLine) => {
@@ -1264,7 +1280,7 @@ async function mergeVideoChunks(sessionId, sessionData) {
         })
         .on('progress', (progress) => {
           if (progress.percent) {
-            console.log(`⏳ FFmpeg progress: ${Math.round(progress.percent)}%`);
+            console.log(`⏳ FFmpeg progress: ${Math.round(progress.percent)}% (${progress.timemark})`);
           }
         })
         .on('end', async () => {
@@ -1277,14 +1293,7 @@ async function mergeVideoChunks(sessionId, sessionData) {
             const stats = await fs.stat(outputPath);
             const sizeMB = (stats.size / 1024 / 1024).toFixed(2);
             console.log(`📊 Final video size: ${sizeMB}MB`);
-            
-            // Clean up temporary files
-            try {
-              await fs.unlink(fileListPath);
-              console.log(`🗑️  Removed temporary file list: ${fileListPath}`);
-            } catch (cleanupError) {
-              console.warn(`⚠️  Could not remove file list: ${cleanupError.message}`);
-            }
+            console.log(`✅ Successfully merged ${chunkFiles.length} WebM chunks into single MP4 file`);
             
             resolve({
               success: true,
