@@ -94,42 +94,9 @@ const CLOUDFLARE_API_BASE = 'https://api.cloudflare.com/client/v4';
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Enhanced CORS configuration for media recording system
+// Public CORS configuration - Allow all origins for development and testing
 const corsOptions = {
-  origin: function(origin, callback) {
-    // Allow requests with no origin (mobile apps, curl, Postman)
-    if (!origin) return callback(null, true);
-    
-    const allowedOrigins = [
-      'http://localhost:3000',
-      'http://localhost:8080', 
-      'http://localhost:8081',
-      'https://media.cloudrestfulapi.com',
-      'https://cloudrestfulapi.com',
-      'http://159.65.131.165',
-      'http://159.65.131.165:3000'
-    ];
-    
-    // Check exact matches first
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-    
-    // Check regex patterns
-    const allowedPatterns = [
-      /^https?:\/\/.*\.cloudrestfulapi\.com$/,
-      /^https?:\/\/localhost(:\d+)?$/,
-      /^http:\/\/159\.65\.131\.165(:\d+)?$/
-    ];
-    
-    const isAllowed = allowedPatterns.some(pattern => pattern.test(origin));
-    if (isAllowed) {
-      return callback(null, true);
-    }
-    
-    console.log(`⚠️ CORS blocked origin: ${origin}`);
-    callback(new Error('Not allowed by CORS'));
-  },
+  origin: true, // Allow all origins
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: [
     'Origin',
@@ -140,6 +107,9 @@ const corsOptions = {
     'Cache-Control',
     'X-Session-ID',
     'X-Chunk-Index',
+    'X-Total-Chunks',
+    'X-File-Name',
+    'X-File-Size',
     'Content-Length'
   ],
   credentials: true,

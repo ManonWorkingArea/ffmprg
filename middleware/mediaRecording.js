@@ -378,39 +378,15 @@ const performanceMonitor = (req, res, next) => {
 };
 
 /**
- * Enhanced CORS middleware for media recording endpoints
+ * Public CORS middleware for media recording endpoints - Allow all origins
  */
 const corsHandler = (req, res, next) => {
   const origin = req.headers.origin;
   
-  // List of allowed origins
-  const allowedOrigins = [
-    'http://localhost:3000',
-    'http://localhost:8080', 
-    'http://localhost:8081',
-    'https://media.cloudrestfulapi.com',
-    'https://cloudrestfulapi.com',
-    'http://159.65.131.165',
-    'http://159.65.131.165:3000'
-  ];
+  console.log(`🌐 CORS: ${req.method} ${req.originalUrl} from origin: ${origin || 'none'} → allowed: all origins`);
   
-  // Check if origin is allowed
-  let corsOrigin = '*';
-  if (origin) {
-    if (allowedOrigins.includes(origin) || 
-        origin.match(/^https?:\/\/.*\.cloudrestfulapi\.com$/) ||
-        origin.match(/^https?:\/\/localhost(:\d+)?$/) ||
-        origin.match(/^http:\/\/159\.65\.131\.165(:\d+)?$/)) {
-      corsOrigin = origin;
-      console.log(`✅ CORS: Origin ${origin} allowed`);
-    } else {
-      console.log(`⚠️ CORS: Origin ${origin} not in allowed list`);
-      corsOrigin = origin; // Allow it anyway for debugging, but log it
-    }
-  }
-  
-  // Set CORS headers with enhanced configuration
-  res.header('Access-Control-Allow-Origin', corsOrigin);
+  // Set CORS headers to allow all origins
+  res.header('Access-Control-Allow-Origin', origin || '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
   res.header('Access-Control-Allow-Headers', [
     'Origin',
@@ -421,18 +397,18 @@ const corsHandler = (req, res, next) => {
     'Cache-Control',
     'X-Session-ID',
     'X-Chunk-Index',
+    'X-Total-Chunks',
+    'X-File-Name',
+    'X-File-Size',
     'Content-Length'
   ].join(', '));
   res.header('Access-Control-Allow-Credentials', 'true');
   res.header('Access-Control-Max-Age', '86400'); // 24 hours
-  res.header('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
-  
-  // Log CORS request for debugging
-  console.log(`🌐 CORS: ${req.method} ${req.originalUrl} from origin: ${origin || 'none'} → allowed: ${corsOrigin}`);
+  res.header('Access-Control-Expose-Headers', 'Content-Length, Content-Range, X-Session-ID, X-Upload-Status');
   
   // Handle preflight requests
   if (req.method === 'OPTIONS') {
-    console.log('✈️  Preflight request handled successfully');
+    console.log('✈️  Preflight request handled successfully - all origins allowed');
     return res.status(200).end();
   } else {
     next();
