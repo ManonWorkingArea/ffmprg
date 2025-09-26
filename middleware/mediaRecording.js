@@ -390,6 +390,7 @@ const corsHandler = (req, res, next) => {
     'http://localhost:8081',
     'https://media.cloudrestfulapi.com',
     'https://cloudrestfulapi.com',
+    'http://159.65.131.165',
     'http://159.65.131.165:3000'
   ];
   
@@ -398,12 +399,17 @@ const corsHandler = (req, res, next) => {
   if (origin) {
     if (allowedOrigins.includes(origin) || 
         origin.match(/^https?:\/\/.*\.cloudrestfulapi\.com$/) ||
-        origin.match(/^https?:\/\/localhost(:\d+)?$/)) {
+        origin.match(/^https?:\/\/localhost(:\d+)?$/) ||
+        origin.match(/^http:\/\/159\.65\.131\.165(:\d+)?$/)) {
       corsOrigin = origin;
+      console.log(`✅ CORS: Origin ${origin} allowed`);
+    } else {
+      console.log(`⚠️ CORS: Origin ${origin} not in allowed list`);
+      corsOrigin = origin; // Allow it anyway for debugging, but log it
     }
   }
   
-  // Set CORS headers
+  // Set CORS headers with enhanced configuration
   res.header('Access-Control-Allow-Origin', corsOrigin);
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
   res.header('Access-Control-Allow-Headers', [
@@ -414,17 +420,19 @@ const corsHandler = (req, res, next) => {
     'Authorization',
     'Cache-Control',
     'X-Session-ID',
-    'X-Chunk-Index'
+    'X-Chunk-Index',
+    'Content-Length'
   ].join(', '));
   res.header('Access-Control-Allow-Credentials', 'true');
   res.header('Access-Control-Max-Age', '86400'); // 24 hours
+  res.header('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
   
   // Log CORS request for debugging
   console.log(`🌐 CORS: ${req.method} ${req.originalUrl} from origin: ${origin || 'none'} → allowed: ${corsOrigin}`);
   
   // Handle preflight requests
   if (req.method === 'OPTIONS') {
-    console.log('✈️  Preflight request handled');
+    console.log('✈️  Preflight request handled successfully');
     return res.status(200).end();
   } else {
     next();

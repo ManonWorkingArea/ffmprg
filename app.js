@@ -96,16 +96,40 @@ const port = process.env.PORT || 3000;
 
 // Enhanced CORS configuration for media recording system
 const corsOptions = {
-  origin: [
-    'http://localhost:3000',
-    'http://localhost:8080', 
-    'http://localhost:8081',
-    'https://media.cloudrestfulapi.com',
-    'https://cloudrestfulapi.com',
-    /^https?:\/\/.*\.cloudrestfulapi\.com$/,
-    /^https?:\/\/localhost(:\d+)?$/,
-    /^http:\/\/159\.65\.131\.165(:\d+)?$/
-  ],
+  origin: function(origin, callback) {
+    // Allow requests with no origin (mobile apps, curl, Postman)
+    if (!origin) return callback(null, true);
+    
+    const allowedOrigins = [
+      'http://localhost:3000',
+      'http://localhost:8080', 
+      'http://localhost:8081',
+      'https://media.cloudrestfulapi.com',
+      'https://cloudrestfulapi.com',
+      'http://159.65.131.165',
+      'http://159.65.131.165:3000'
+    ];
+    
+    // Check exact matches first
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    
+    // Check regex patterns
+    const allowedPatterns = [
+      /^https?:\/\/.*\.cloudrestfulapi\.com$/,
+      /^https?:\/\/localhost(:\d+)?$/,
+      /^http:\/\/159\.65\.131\.165(:\d+)?$/
+    ];
+    
+    const isAllowed = allowedPatterns.some(pattern => pattern.test(origin));
+    if (isAllowed) {
+      return callback(null, true);
+    }
+    
+    console.log(`⚠️ CORS blocked origin: ${origin}`);
+    callback(new Error('Not allowed by CORS'));
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: [
     'Origin',
@@ -115,35 +139,45 @@ const corsOptions = {
     'Authorization',
     'Cache-Control',
     'X-Session-ID',
-    'X-Chunk-Index'
+    'X-Chunk-Index',
+    'Content-Length'
   ],
   credentials: true,
   maxAge: 86400, // 24 hours preflight cache
-  optionsSuccessStatus: 200
+  optionsSuccessStatus: 200,
+  preflightContinue: false
 };
 
 app.use(cors(corsOptions));
 
-// Additional CORS headers for media recording endpoints
+// Additional CORS headers for media recording endpoints with size handling
 app.use('/api/media', (req, res, next) => {
+  const origin = req.headers.origin;
+  
+  // Log CORS request for debugging
+  console.log(`🌐 CORS request: ${req.method} ${req.url} from origin: ${origin || 'none'}`);
+  
   // Handle preflight requests
   if (req.method === 'OPTIONS') {
-    res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
-    res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Origin,X-Requested-With,Content-Type,Accept,Authorization,Cache-Control,X-Session-ID,X-Chunk-Index');
+    res.header('Access-Control-Allow-Origin', origin || '*');
+    res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH');
+    res.header('Access-Control-Allow-Headers', 'Origin,X-Requested-With,Content-Type,Accept,Authorization,Cache-Control,X-Session-ID,X-Chunk-Index,Content-Length');
     res.header('Access-Control-Allow-Credentials', 'true');
     res.header('Access-Control-Max-Age', '86400');
+    console.log(`✅ CORS preflight response sent for origin: ${origin}`);
     return res.status(200).end();
   }
   
   // Set CORS headers for all requests
-  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.header('Access-Control-Allow-Origin', origin || '*');
   res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
   next();
 });
 
-app.use(express.json({ limit: '50mb' })); // เพิ่ม limit สำหรับ JSON
-app.use(express.urlencoded({ limit: '50mb', extended: true })); // เพิ่ม limit สำหรับ URL encoded
+// Increased limits for video chunk uploads (100MB for large video chunks)
+app.use(express.json({ limit: '100mb' })); 
+app.use(express.urlencoded({ limit: '100mb', extended: true }));
 app.use(express.static('public'));
 app.use(express.static('outputs'));
 

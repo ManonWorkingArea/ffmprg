@@ -5,12 +5,14 @@ const { v4: uuidv4 } = require('uuid');
 const fs = require('fs').promises;
 const path = require('path');
 
-// Configure multer for chunk uploads
+// Configure multer for chunk uploads with increased limits for 4K@60fps video
 const upload = multer({ 
   dest: 'uploads/chunks/',
   limits: {
-    fileSize: 50 * 1024 * 1024, // 50MB per chunk
-    fieldSize: 10 * 1024 * 1024  // 10MB for metadata
+    fileSize: 100 * 1024 * 1024, // 100MB per chunk (for 4K@60fps chunks)
+    fieldSize: 10 * 1024 * 1024,  // 10MB for metadata
+    fields: 10, // Maximum number of fields
+    files: 1    // Maximum number of files
   }
 });
 
