@@ -103,7 +103,7 @@ const initializeOnce = async () => {
 };
 
 /**
- * Validate chunk file integrity and get metadata
+ * Enhanced chunk file validation with corruption detection and recovery
  */
 async function validateChunkFile(chunkPath) {
   try {
@@ -111,66 +111,194 @@ async function validateChunkFile(chunkPath) {
     const stats = await fs.stat(chunkPath);
     
     if (stats.size === 0) {
-      return { isValid: false, error: 'File is empty' };
+      return { isValid: false, error: 'File is empty', canRecover: false };
     }
     
     if (stats.size < 100) {
-      return { isValid: false, error: `File too small (${stats.size} bytes)` };
+      return { isValid: false, error: `File too small (${stats.size} bytes)`, canRecover: false };
     }
     
-    // Read file header for format validation
-    const buffer = Buffer.alloc(128);
+    // Read more of the file header for better validation
+    const headerSize = Math.min(1024, stats.size);
+    const buffer = Buffer.alloc(headerSize);
     const fileHandle = await fs.open(chunkPath, 'r');
     
     try {
-      await fileHandle.read(buffer, 0, 128, 0);
+      await fileHandle.read(buffer, 0, headerSize, 0);
     } finally {
       await fileHandle.close();
     }
     
-    // Check for WebM signature
-    const isWebM = buffer.slice(0, 4).toString('hex') === '1a45dfa3';
+    // Check for various video formats
+    let formatDetected = 'unknown';
+    let isValidFormat = false;
     
-    if (!isWebM) {
-      return { 
-        isValid: false, 
-        error: 'Not a valid WebM file (missing EBML header)' 
+    // WebM/EBML signature
+    if (buffer.slice(0, 4).toString('hex') === '1a45dfa3') {
+      formatDetected = 'webm';
+      
+      // Check if EBML header is complete
+      const ebmlHeaderEnd = buffer.indexOf(Buffer.from([0x18, 0x53, 0x80, 0x67])); // Segment marker
+      if (ebmlHeaderEnd > 0 && ebmlHeaderEnd < 200) {
+        isValidFormat = true;
+      } else {
+        console.log(`⚠️  WebM detected but incomplete EBML header: ${path.basename(chunkPath)}`);
+      }
+    }
+    // MP4 signature
+    else if (buffer.slice(4, 8).toString() === 'ftyp') {
+      formatDetected = 'mp4';
+      isValidFormat = true;
+    }
+    // AVI signature
+    else if (buffer.slice(0, 4).toString() === 'RIFF' && buffer.slice(8, 12).toString() === 'AVI ') {
+      formatDetected = 'avi';
+      isValidFormat = true;
+    }
+    // Partial WebM (might be recoverable)
+    else if (buffer.includes(Buffer.from('matroska')) || buffer.includes(Buffer.from('webm'))) {
+      formatDetected = 'webm-partial';
+      console.log(`⚠️  Partial WebM detected: ${path.basename(chunkPath)}`);
+    }
+    
+    // Try ffprobe with error recovery
+    let metadata = null;
+    let ffprobeError = null;
+    
+    try {
+      const ffprobe = require('fluent-ffmpeg').ffprobe;
+      metadata = await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('FFprobe timeout after 5s'));
+        }, 5000);
+        
+        ffprobe(chunkPath, (err, data) => {
+          clearTimeout(timeout);
+          if (err) reject(err);
+          else resolve(data);
+        });
+      });
+    } catch (error) {
+      ffprobeError = error.message;
+      console.log(`⚠️  FFprobe failed for ${path.basename(chunkPath)}: ${error.message}`);
+    }
+    
+    // If ffprobe failed, analyze what we can recover
+    if (!metadata) {
+      const canRecover = formatDetected.includes('webm') || isValidFormat;
+      
+      return {
+        isValid: false,
+        error: `FFprobe failed: ${ffprobeError}. Format: ${formatDetected}`,
+        format: formatDetected,
+        canRecover: canRecover,
+        size: stats.size,
+        recoveryStrategy: canRecover ? 'reprocess' : 'skip'
       };
     }
     
-    // Use ffprobe to get detailed metadata
-    const ffprobe = require('fluent-ffmpeg').ffprobe;
-    const metadata = await new Promise((resolve, reject) => {
-      ffprobe(chunkPath, (err, data) => {
-        if (err) reject(err);
-        else resolve(data);
-      });
-    });
-    
+    // Extract stream information
     const videoStream = metadata.streams.find(s => s.codec_type === 'video');
     
     if (!videoStream) {
-      return { 
-        isValid: false, 
-        error: 'No video stream found in file' 
+      return {
+        isValid: false,
+        error: 'No video stream found in file',
+        format: formatDetected,
+        canRecover: true,
+        size: stats.size,
+        recoveryStrategy: 'reprocess'
       };
     }
     
+    // Check for duration issues
+    const duration = parseFloat(metadata.format.duration) || 0;
+    if (duration === 0) {
+      console.log(`⚠️  Zero duration detected in ${path.basename(chunkPath)}`);
+    }
+    
+    // Success case
     return {
       isValid: true,
-      duration: parseFloat(metadata.format.duration) || 0,
-      format: metadata.format.format_name || 'unknown',
+      format: formatDetected,
       codec: videoStream.codec_name || 'unknown',
-      resolution: `${videoStream.width}x${videoStream.height}`,
+      resolution: videoStream.width && videoStream.height ? 
+        `${videoStream.width}x${videoStream.height}` : 'unknown',
+      duration: duration,
       bitrate: parseInt(metadata.format.bit_rate) || 0,
-      size: stats.size
+      size: stats.size,
+      hasAudio: metadata.streams.some(s => s.codec_type === 'audio'),
+      frameRate: videoStream.r_frame_rate ? eval(videoStream.r_frame_rate) : 0,
+      startTime: parseFloat(metadata.format.start_time) || 0
     };
     
   } catch (error) {
-    return { 
-      isValid: false, 
-      error: `Validation failed: ${error.message}` 
+    return {
+      isValid: false,
+      error: `Validation failed: ${error.message}`,
+      canRecover: false,
+      size: 0
     };
+  }
+}
+
+/**
+ * Attempt to recover corrupted chunk files
+ */
+async function recoverChunkFile(chunkPath, recoveryStrategy = 'reprocess') {
+  console.log(`🔧 Attempting recovery for: ${path.basename(chunkPath)} (strategy: ${recoveryStrategy})`);
+  
+  try {
+    const backupPath = chunkPath + '.backup';
+    const recoveredPath = chunkPath + '.recovered';
+    
+    // Create backup
+    await fs.copyFile(chunkPath, backupPath);
+    
+    if (recoveryStrategy === 'reprocess') {
+      // Try to reprocess with ffmpeg to fix corruption
+      return new Promise((resolve, reject) => {
+        ffmpeg(chunkPath)
+          .inputOptions([
+            '-err_detect', 'ignore_err',  // Ignore minor errors
+            '-fflags', '+genpts'          // Generate timestamps
+          ])
+          .outputOptions([
+            '-c:v', 'libx264',      // Re-encode video
+            '-preset', 'ultrafast', // Fast processing
+            '-crf', '28',           // Reasonable quality
+            '-avoid_negative_ts', 'make_zero',
+            '-movflags', 'faststart'
+          ])
+          .output(recoveredPath)
+          .on('end', async () => {
+            try {
+              // Verify recovered file
+              const stats = await fs.stat(recoveredPath);
+              if (stats.size > 1000) {
+                await fs.rename(recoveredPath, chunkPath);
+                console.log(`✅ Recovery successful: ${path.basename(chunkPath)}`);
+                resolve({ success: true, method: 'reprocess' });
+              } else {
+                resolve({ success: false, error: 'Recovered file too small' });
+              }
+            } catch (error) {
+              resolve({ success: false, error: `Failed to replace recovered file: ${error.message}` });
+            }
+          })
+          .on('error', (error) => {
+            console.log(`❌ Recovery failed: ${error.message}`);
+            resolve({ success: false, error: error.message });
+          })
+          .run();
+      });
+    }
+    
+    return { success: false, error: 'Unknown recovery strategy' };
+    
+  } catch (error) {
+    console.error(`❌ Recovery attempt failed: ${error.message}`);
+    return { success: false, error: error.message };
   }
 }
 
@@ -300,46 +428,68 @@ async function mergeVideoChunksWithWebMFix(sessionId, sessionData) {
         
         console.log(`📋 Analyzing WebM chunk ${chunk.chunkIndex}: ${chunk.filename}`);
         
-        // Get detailed WebM info with ffprobe
-        let chunkInfo = {};
-        try {
-          const ffprobe = require('fluent-ffmpeg').ffprobe;
-          const metadata = await new Promise((resolve, reject) => {
-            ffprobe(chunkPath, (err, data) => {
-              if (err) reject(err);
-              else resolve(data);
-            });
-          });
+        // Use enhanced validation with recovery
+        const validationResult = await validateChunkFile(chunkPath);
+        
+        if (!validationResult.isValid) {
+          console.warn(`❌ Chunk ${chunk.chunkIndex} validation failed: ${validationResult.error}`);
           
-          chunkInfo = {
-            duration: parseFloat(metadata.format.duration) || 0,
-            startTime: parseFloat(metadata.format.start_time) || 0,
-            bitrate: parseInt(metadata.format.bit_rate) || 0,
-            hasVideo: metadata.streams.some(s => s.codec_type === 'video'),
-            videoCodec: metadata.streams.find(s => s.codec_type === 'video')?.codec_name || 'unknown',
-            resolution: metadata.streams.find(s => s.codec_type === 'video') ? 
-              `${metadata.streams.find(s => s.codec_type === 'video').width}x${metadata.streams.find(s => s.codec_type === 'video').height}` : 'unknown'
-          };
-          
-          // Check for timestamp issues common in WebM
-          if (chunkInfo.startTime < 0 || (chunkInfo.startTime > 0 && chunk.chunkIndex === 0)) {
-            hasTimestampIssues = true;
-            console.log(`⚠️  Timestamp issue detected in chunk ${chunk.chunkIndex}: start_time=${chunkInfo.startTime}`);
+          // Attempt recovery if possible
+          if (validationResult.canRecover) {
+            console.log(`🔧 Attempting to recover chunk ${chunk.chunkIndex}...`);
+            
+            const recoveryResult = await recoverChunkFile(chunkPath, validationResult.recoveryStrategy);
+            
+            if (recoveryResult.success) {
+              console.log(`✅ Chunk ${chunk.chunkIndex} recovered successfully`);
+              
+              // Re-validate recovered chunk
+              const revalidationResult = await validateChunkFile(chunkPath);
+              if (revalidationResult.isValid) {
+                chunkInfo = {
+                  duration: revalidationResult.duration,
+                  startTime: revalidationResult.startTime || 0,
+                  bitrate: revalidationResult.bitrate,
+                  hasVideo: true,
+                  videoCodec: revalidationResult.codec,
+                  resolution: revalidationResult.resolution
+                };
+              } else {
+                console.warn(`⚠️  Recovery validation failed for chunk ${chunk.chunkIndex}, skipping`);
+                continue;
+              }
+            } else {
+              console.warn(`❌ Recovery failed for chunk ${chunk.chunkIndex}: ${recoveryResult.error}, skipping`);
+              continue;
+            }
+          } else {
+            console.warn(`⚠️  Chunk ${chunk.chunkIndex} cannot be recovered, skipping`);
+            continue;
           }
-          
-        } catch (probeError) {
-          console.warn(`⚠️  Could not probe chunk ${chunk.chunkIndex}: ${probeError.message}`);
+        } else {
+          // Use validation results
           chunkInfo = {
-            duration: 0,
-            startTime: 0,
-            bitrate: 0,
+            duration: validationResult.duration,
+            startTime: validationResult.startTime || 0,
+            bitrate: validationResult.bitrate,
             hasVideo: true,
-            videoCodec: 'webm',
-            resolution: 'unknown'
+            videoCodec: validationResult.codec,
+            resolution: validationResult.resolution
           };
         }
         
-        totalExpectedDuration += chunkInfo.duration;
+        // Check for timestamp issues
+        if (chunkInfo.startTime < 0 || (chunkInfo.startTime > 0 && chunk.chunkIndex === 0)) {
+          hasTimestampIssues = true;
+          console.log(`⚠️  Timestamp issue detected in chunk ${chunk.chunkIndex}: start_time=${chunkInfo.startTime}`);
+        }
+        
+        // Only count duration if it's reasonable (not 0 and not too large)
+        if (chunkInfo.duration > 0 && chunkInfo.duration < 300) { // Max 5 minutes per chunk
+          totalExpectedDuration += chunkInfo.duration;
+        } else if (chunkInfo.duration === 0) {
+          console.warn(`⚠️  Chunk ${chunk.chunkIndex} has zero duration`);
+        }
         
         chunkFiles.push({
           index: chunk.chunkIndex,
@@ -357,7 +507,38 @@ async function mergeVideoChunksWithWebMFix(sessionId, sessionData) {
     }
     
     if (chunkFiles.length === 0) {
-      throw new Error('No valid WebM chunk files found after analysis');
+      const errorMsg = `No valid WebM chunk files found after analysis and recovery attempts.
+
+Analysis Results:
+- Total chunks attempted: ${sessionData.chunks.length}
+- Valid chunks found: 0
+- Common causes:
+  1. EBML header parsing failed (corrupted WebM files)
+  2. Invalid data found when processing input
+  3. Network transfer corruption
+  4. Recording process issues
+
+Suggestions:
+1. Check the recording process for WebM generation issues
+2. Verify network transfer integrity
+3. Consider using MP4 format instead of WebM for better compatibility`;
+
+      throw new Error(errorMsg);
+    }
+    
+    // Check if we have enough valid chunks for a reasonable video
+    const validChunkRatio = chunkFiles.length / sessionData.chunks.length;
+    if (validChunkRatio < 0.5) {
+      console.warn(`⚠️  Low valid chunk ratio: ${(validChunkRatio * 100).toFixed(1)}% (${chunkFiles.length}/${sessionData.chunks.length})`);
+      console.warn(`⚠️  This may result in a significantly shorter video than expected`);
+    }
+    
+    // Estimate expected duration based on chunk count if individual durations are zero
+    if (totalExpectedDuration === 0 && chunkFiles.length > 0) {
+      // Assume each chunk is roughly 1-2 seconds (common for screen recording)
+      const estimatedDuration = chunkFiles.length * 1.5;
+      console.warn(`⚠️  No valid duration data found, estimating ${estimatedDuration.toFixed(1)}s based on ${chunkFiles.length} chunks`);
+      totalExpectedDuration = estimatedDuration;
     }
     
     // Sort by index
@@ -500,16 +681,128 @@ async function mergeVideoChunksWithWebMFix(sessionId, sessionData) {
             reject(new Error(`Failed to verify output: ${statError.message}`));
           }
         })
-        .on('error', (error) => {
+        .on('error', async (error) => {
           console.error(`❌ FFmpeg error: ${error.message}`);
           console.error(`📊 Context: ${chunkFiles.length} WebM chunks, expected ${totalExpectedDuration.toFixed(2)}s`);
-          reject(new Error(`WebM merge failed: ${error.message}`));
+          
+          // Try fallback strategy if the main approach fails
+          console.log(`🔄 Attempting fallback strategy...`);
+          
+          try {
+            const fallbackResult = await attemptFallbackMerge(chunkFiles, outputPath, sessionId);
+            if (fallbackResult.success) {
+              console.log(`✅ Fallback merge succeeded!`);
+              resolve(fallbackResult);
+              return;
+            }
+          } catch (fallbackError) {
+            console.error(`❌ Fallback merge also failed: ${fallbackError.message}`);
+          }
+          
+          reject(new Error(`WebM merge failed: ${error.message}. Fallback also failed.`));
         })
         .run();
     });
     
   } catch (error) {
     console.error(`❌ Error in mergeVideoChunksWithWebMFix: ${error.message}`);
+    throw error;
+  }
+}
+
+/**
+ * Fallback merge strategy for when the main WebM merge fails
+ * Uses simpler concat demuxer with more forgiving settings
+ */
+async function attemptFallbackMerge(chunkFiles, outputPath, sessionId) {
+  console.log(`🔄 Starting fallback merge with ${chunkFiles.length} chunks...`);
+  
+  try {
+    // Create a file list for concat demuxer
+    const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
+    const sessionDir = path.join(sessionsDir, sessionId);
+    const fileListPath = path.join(sessionDir, 'fallback_filelist.txt');
+    
+    const fileListContent = chunkFiles
+      .map(chunk => `file '${path.basename(chunk.path)}'`)
+      .join('\n');
+    
+    await fs.writeFile(fileListPath, fileListContent);
+    console.log(`📝 Created fallback file list: ${fileListPath}`);
+    
+    return new Promise((resolve, reject) => {
+      const startTime = Date.now();
+      
+      // Use concat demuxer with very forgiving settings
+      ffmpeg()
+        .input(fileListPath)
+        .inputOptions([
+          '-f', 'concat',
+          '-safe', '0',
+          '-protocol_whitelist', 'file,pipe',
+          '-err_detect', 'ignore_err',     // Ignore all errors
+          '-fflags', '+genpts+igndts'      // Generate PTS, ignore DTS
+        ])
+        .outputOptions([
+          '-c:v', 'libx264',
+          '-preset', 'ultrafast',          // Fastest possible encoding
+          '-crf', '30',                    // Lower quality for speed
+          '-pix_fmt', 'yuv420p',
+          '-movflags', 'faststart',
+          '-avoid_negative_ts', 'make_zero',
+          '-max_muxing_queue_size', '9999',
+          '-vsync', 'drop'                 // Drop frames if needed
+        ])
+        .output(outputPath)
+        .on('start', (commandLine) => {
+          console.log(`🚀 Fallback FFmpeg started (concat demuxer)`);
+        })
+        .on('stderr', (stderrLine) => {
+          // Only log important errors, ignore warnings
+          if (stderrLine.includes('Error') || stderrLine.includes('Failed')) {
+            console.log(`FFmpeg fallback stderr: ${stderrLine}`);
+          }
+        })
+        .on('end', async () => {
+          const endTime = Date.now();
+          const processingTime = ((endTime - startTime) / 1000).toFixed(2);
+          
+          try {
+            const stats = await fs.stat(outputPath);
+            const sizeMB = (stats.size / 1024 / 1024).toFixed(2);
+            
+            console.log(`✅ Fallback merge completed in ${processingTime}s`);
+            console.log(`📊 Fallback video: ${sizeMB}MB`);
+            
+            // Clean up file list
+            await fs.unlink(fileListPath).catch(() => {});
+            
+            resolve({
+              success: true,
+              outputPath,
+              sizeMB: parseFloat(sizeMB),
+              duration: parseFloat(processingTime),
+              chunksProcessed: chunkFiles.length,
+              expectedDuration: chunkFiles.reduce((sum, c) => sum + c.duration, 0),
+              actualDuration: 0, // Will be detected later if needed
+              method: 'fallback-concat',
+              timestampFixed: false,
+              durationAccuracy: 'unknown'
+            });
+            
+          } catch (statError) {
+            reject(new Error(`Fallback failed to verify output: ${statError.message}`));
+          }
+        })
+        .on('error', (error) => {
+          console.error(`❌ Fallback merge error: ${error.message}`);
+          reject(error);
+        })
+        .run();
+    });
+    
+  } catch (error) {
+    console.error(`❌ Fallback setup error: ${error.message}`);
     throw error;
   }
 }
