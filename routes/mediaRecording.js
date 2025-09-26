@@ -143,7 +143,15 @@ async function validateChunkFile(chunkPath) {
         isValidFormat = true;
       } else {
         console.log(`⚠️  WebM detected but incomplete EBML header: ${path.basename(chunkPath)}`);
+        // Try to detect if it's a partially valid WebM
+        isValidFormat = buffer.length > 32; // At least some structure
       }
+    }
+    // Check for WebM even without proper EBML signature (corrupted header)
+    else if (buffer.includes(Buffer.from('webm')) || buffer.includes(Buffer.from('VP8')) || buffer.includes(Buffer.from('VP9'))) {
+      formatDetected = 'webm-detected';
+      isValidFormat = true; // Try to recover
+      console.log(`🔍 WebM content detected without proper EBML: ${path.basename(chunkPath)}`);
     }
     // MP4 signature
     else if (buffer.slice(4, 8).toString() === 'ftyp') {
@@ -155,10 +163,22 @@ async function validateChunkFile(chunkPath) {
       formatDetected = 'avi';
       isValidFormat = true;
     }
-    // Partial WebM (might be recoverable)
-    else if (buffer.includes(Buffer.from('matroska')) || buffer.includes(Buffer.from('webm'))) {
-      formatDetected = 'webm-partial';
-      console.log(`⚠️  Partial WebM detected: ${path.basename(chunkPath)}`);
+    // Raw video data patterns (emergency detection)
+    else if (stats.size > 10000 && (
+      buffer.includes(Buffer.from('matroska')) || 
+      buffer.includes(Buffer.from('libvpx')) ||
+      buffer.includes(Buffer.from([0x9f, 0x01, 0x2f])) || // Common WebM patterns
+      (buffer[0] === 0x1a && buffer.length > 100) // Possible corrupted EBML
+    )) {
+      formatDetected = 'webm-raw';
+      isValidFormat = true; // Force recovery attempt
+      console.log(`🔍 Raw WebM-like data detected: ${path.basename(chunkPath)}`);
+    }
+    // Fallback for files that might be recoverable
+    else if (stats.size > 5000) {
+      formatDetected = 'unknown-recoverable';
+      isValidFormat = false;
+      console.log(`🔍 Unknown format but size suggests video data: ${path.basename(chunkPath)} (${stats.size} bytes)`);
     }
     
     // Try ffprobe with error recovery
@@ -185,7 +205,17 @@ async function validateChunkFile(chunkPath) {
     
     // If ffprobe failed, analyze what we can recover
     if (!metadata) {
-      const canRecover = formatDetected.includes('webm') || isValidFormat;
+      const canRecover = formatDetected.includes('webm') || 
+                        formatDetected.includes('recoverable') ||
+                        isValidFormat || 
+                        stats.size > 5000; // Any substantial file
+      
+      let recoveryStrategy = 'skip';
+      if (formatDetected.includes('webm')) {
+        recoveryStrategy = 'aggressive-reprocess';
+      } else if (formatDetected.includes('recoverable') || stats.size > 10000) {
+        recoveryStrategy = 'force-webm';
+      }
       
       return {
         isValid: false,
@@ -193,7 +223,7 @@ async function validateChunkFile(chunkPath) {
         format: formatDetected,
         canRecover: canRecover,
         size: stats.size,
-        recoveryStrategy: canRecover ? 'reprocess' : 'skip'
+        recoveryStrategy: recoveryStrategy
       };
     }
     
@@ -243,7 +273,7 @@ async function validateChunkFile(chunkPath) {
 }
 
 /**
- * Attempt to recover corrupted chunk files
+ * Attempt to recover corrupted chunk files with multiple strategies
  */
 async function recoverChunkFile(chunkPath, recoveryStrategy = 'reprocess') {
   console.log(`🔧 Attempting recovery for: ${path.basename(chunkPath)} (strategy: ${recoveryStrategy})`);
@@ -255,30 +285,35 @@ async function recoverChunkFile(chunkPath, recoveryStrategy = 'reprocess') {
     // Create backup
     await fs.copyFile(chunkPath, backupPath);
     
-    if (recoveryStrategy === 'reprocess') {
-      // Try to reprocess with ffmpeg to fix corruption
+    if (recoveryStrategy === 'aggressive-reprocess') {
+      // Very aggressive reprocessing with error tolerance
       return new Promise((resolve, reject) => {
         ffmpeg(chunkPath)
           .inputOptions([
-            '-err_detect', 'ignore_err',  // Ignore minor errors
-            '-fflags', '+genpts'          // Generate timestamps
+            '-err_detect', 'ignore_err',     // Ignore all errors
+            '-fflags', '+genpts+igndts',     // Generate PTS, ignore DTS
+            '-analyzeduration', '1000000',   // Analyze longer
+            '-probesize', '5000000',         // Probe more data
+            '-f', 'matroska'                 // Force matroska format
           ])
           .outputOptions([
-            '-c:v', 'libx264',      // Re-encode video
-            '-preset', 'ultrafast', // Fast processing
-            '-crf', '28',           // Reasonable quality
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-crf', '30',                    // Lower quality for speed
+            '-pix_fmt', 'yuv420p',
+            '-movflags', 'faststart',
             '-avoid_negative_ts', 'make_zero',
-            '-movflags', 'faststart'
+            '-vsync', 'drop',               // Drop problematic frames
+            '-max_muxing_queue_size', '1024'
           ])
           .output(recoveredPath)
           .on('end', async () => {
             try {
-              // Verify recovered file
               const stats = await fs.stat(recoveredPath);
               if (stats.size > 1000) {
                 await fs.rename(recoveredPath, chunkPath);
-                console.log(`✅ Recovery successful: ${path.basename(chunkPath)}`);
-                resolve({ success: true, method: 'reprocess' });
+                console.log(`✅ Aggressive recovery successful: ${path.basename(chunkPath)}`);
+                resolve({ success: true, method: 'aggressive-reprocess' });
               } else {
                 resolve({ success: false, error: 'Recovered file too small' });
               }
@@ -287,7 +322,90 @@ async function recoverChunkFile(chunkPath, recoveryStrategy = 'reprocess') {
             }
           })
           .on('error', (error) => {
-            console.log(`❌ Recovery failed: ${error.message}`);
+            console.log(`❌ Aggressive recovery failed: ${error.message}`);
+            resolve({ success: false, error: error.message });
+          })
+          .run();
+      });
+    }
+    
+    else if (recoveryStrategy === 'force-webm') {
+      // Force treating as WebM and try to extract any video data
+      return new Promise((resolve, reject) => {
+        ffmpeg(chunkPath)
+          .inputOptions([
+            '-f', 'matroska,webm',          // Force WebM format
+            '-err_detect', 'ignore_err',
+            '-fflags', '+genpts+igndts',
+            '-analyzeduration', '2000000',   // Analyze even longer
+            '-probesize', '10000000'
+          ])
+          .outputOptions([
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-crf', '35',                   // Even lower quality
+            '-pix_fmt', 'yuv420p',
+            '-movflags', 'faststart',
+            '-avoid_negative_ts', 'make_zero',
+            '-vsync', 'drop',
+            '-r', '15',                     // Lower frame rate
+            '-max_muxing_queue_size', '1024'
+          ])
+          .output(recoveredPath)
+          .on('end', async () => {
+            try {
+              const stats = await fs.stat(recoveredPath);
+              if (stats.size > 1000) {
+                await fs.rename(recoveredPath, chunkPath);
+                console.log(`✅ Force WebM recovery successful: ${path.basename(chunkPath)}`);
+                resolve({ success: true, method: 'force-webm' });
+              } else {
+                resolve({ success: false, error: 'Force WebM recovery produced too small file' });
+              }
+            } catch (error) {
+              resolve({ success: false, error: `Force WebM recovery replacement failed: ${error.message}` });
+            }
+          })
+          .on('error', (error) => {
+            console.log(`❌ Force WebM recovery failed: ${error.message}`);
+            resolve({ success: false, error: error.message });
+          })
+          .run();
+      });
+    }
+    
+    else if (recoveryStrategy === 'reprocess') {
+      // Standard reprocessing
+      return new Promise((resolve, reject) => {
+        ffmpeg(chunkPath)
+          .inputOptions([
+            '-err_detect', 'ignore_err',
+            '-fflags', '+genpts'
+          ])
+          .outputOptions([
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-crf', '28',
+            '-avoid_negative_ts', 'make_zero',
+            '-movflags', 'faststart'
+          ])
+          .output(recoveredPath)
+          .on('end', async () => {
+            try {
+              const stats = await fs.stat(recoveredPath);
+              if (stats.size > 1000) {
+                await fs.rename(recoveredPath, chunkPath);
+                console.log(`✅ Standard recovery successful: ${path.basename(chunkPath)}`);
+                resolve({ success: true, method: 'reprocess' });
+              } else {
+                resolve({ success: false, error: 'Standard recovery produced too small file' });
+              }
+            } catch (error) {
+              resolve({ success: false, error: `Standard recovery replacement failed: ${error.message}` });
+            }
+          })
+          .on('error', (error) => {
+            console.log(`❌ Standard recovery failed: ${error.message}`);
             resolve({ success: false, error: error.message });
           })
           .run();
@@ -531,6 +649,85 @@ Suggestions:
     if (validChunkRatio < 0.5) {
       console.warn(`⚠️  Low valid chunk ratio: ${(validChunkRatio * 100).toFixed(1)}% (${chunkFiles.length}/${sessionData.chunks.length})`);
       console.warn(`⚠️  This may result in a significantly shorter video than expected`);
+      
+      // If extremely low ratio, try emergency recovery on remaining chunks
+      if (validChunkRatio < 0.1) {
+        console.log(`🚨 Emergency recovery mode: attempting to recover more chunks...`);
+        
+        const emergencyRecovered = [];
+        for (const chunk of sessionData.chunks) {
+          const chunkPath = path.join(chunksDir, chunk.filename);
+          
+          // Skip already valid chunks
+          if (chunkFiles.some(cf => cf.filename === chunk.filename)) {
+            continue;
+          }
+          
+          try {
+            // Try emergency recovery with very aggressive settings
+            console.log(`🔧 Emergency recovery for: ${chunk.filename}`);
+            const recoveryResult = await recoverChunkFile(chunkPath, 'force-webm');
+            
+            if (recoveryResult.success) {
+              // Re-validate the recovered chunk
+              const revalidation = await validateChunkFile(chunkPath);
+              if (revalidation.isValid) {
+                emergencyRecovered.push({
+                  index: chunk.chunkIndex,
+                  path: chunkPath,
+                  filename: chunk.filename,
+                  size: revalidation.size,
+                  duration: revalidation.duration || 0,
+                  startTime: revalidation.startTime || 0,
+                  bitrate: revalidation.bitrate,
+                  hasVideo: true,
+                  videoCodec: revalidation.codec,
+                  resolution: revalidation.resolution
+                });
+                
+                totalExpectedDuration += (revalidation.duration || 0);
+                console.log(`✅ Emergency recovery successful for: ${chunk.filename}`);
+              }
+            }
+          } catch (emergencyError) {
+            console.log(`❌ Emergency recovery failed for ${chunk.filename}: ${emergencyError.message}`);
+          }
+        }
+        
+        // Add emergency recovered chunks
+        chunkFiles.push(...emergencyRecovered);
+        chunkFiles.sort((a, b) => a.index - b.index);
+        
+        const newRatio = chunkFiles.length / sessionData.chunks.length;
+        console.log(`🚨 Emergency recovery complete: ${emergencyRecovered.length} additional chunks recovered`);
+        console.log(`📊 New valid ratio: ${(newRatio * 100).toFixed(1)}% (${chunkFiles.length}/${sessionData.chunks.length})`);
+      }
+    }
+    
+    // Final check - if still too few chunks, provide better error messaging
+    if (chunkFiles.length < Math.max(1, Math.floor(sessionData.chunks.length * 0.1))) {
+      const errorMsg = `Critical: Only ${chunkFiles.length}/${sessionData.chunks.length} chunks (${(chunkFiles.length/sessionData.chunks.length*100).toFixed(1)}%) could be recovered.
+
+Detailed Analysis:
+- Total chunks attempted: ${sessionData.chunks.length}
+- Successfully recovered: ${chunkFiles.length}
+- Recovery success rate: ${(chunkFiles.length/sessionData.chunks.length*100).toFixed(1)}%
+
+This suggests a systematic issue with the recording process:
+1. WebM chunks are being generated with severely corrupted headers
+2. EBML structure is malformed at source
+3. Possible encoder configuration issues
+
+Recommendations:
+1. Check MediaRecorder configuration on client side
+2. Consider switching to MP4 format instead of WebM
+3. Implement client-side chunk validation before upload
+4. Review network transfer process for corruption
+
+The merge will proceed with available chunks but may result in a very short video.`;
+
+      console.error(errorMsg);
+      // Don't throw error, let it proceed with available chunks
     }
     
     // Estimate expected duration based on chunk count if individual durations are zero
