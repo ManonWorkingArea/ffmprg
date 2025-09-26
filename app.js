@@ -96,7 +96,7 @@ const port = process.env.PORT || 3000;
 
 // Public CORS configuration - Allow all origins for development and testing
 const corsOptions = {
-  origin: true, // Allow all origins
+  origin: '*', // Allow all origins (simplified)
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: [
     'Origin',
@@ -112,7 +112,7 @@ const corsOptions = {
     'X-File-Size',
     'Content-Length'
   ],
-  credentials: true,
+  credentials: false, // Must be false when origin is '*'
   maxAge: 86400, // 24 hours preflight cache
   optionsSuccessStatus: 200,
   preflightContinue: false
@@ -120,28 +120,13 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 
-// Additional CORS headers for media recording endpoints with size handling
+// Logging middleware for media recording endpoints
 app.use('/api/media', (req, res, next) => {
   const origin = req.headers.origin;
   
-  // Log CORS request for debugging
-  console.log(`🌐 CORS request: ${req.method} ${req.url} from origin: ${origin || 'none'}`);
+  // Log request for debugging
+  console.log(`🌐 Media API request: ${req.method} ${req.url} from origin: ${origin || 'none'}`);
   
-  // Handle preflight requests
-  if (req.method === 'OPTIONS') {
-    res.header('Access-Control-Allow-Origin', origin || '*');
-    res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS,PATCH');
-    res.header('Access-Control-Allow-Headers', 'Origin,X-Requested-With,Content-Type,Accept,Authorization,Cache-Control,X-Session-ID,X-Chunk-Index,Content-Length');
-    res.header('Access-Control-Allow-Credentials', 'true');
-    res.header('Access-Control-Max-Age', '86400');
-    console.log(`✅ CORS preflight response sent for origin: ${origin}`);
-    return res.status(200).end();
-  }
-  
-  // Set CORS headers for all requests
-  res.header('Access-Control-Allow-Origin', origin || '*');
-  res.header('Access-Control-Allow-Credentials', 'true');
-  res.header('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
   next();
 });
 

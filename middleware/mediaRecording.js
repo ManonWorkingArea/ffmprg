@@ -385,8 +385,8 @@ const corsHandler = (req, res, next) => {
   
   console.log(`🌐 CORS: ${req.method} ${req.originalUrl} from origin: ${origin || 'none'} → allowed: all origins`);
   
-  // Set CORS headers to allow all origins
-  res.header('Access-Control-Allow-Origin', origin || '*');
+  // Set CORS headers to allow all origins (do not set credentials when origin is '*')
+  res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
   res.header('Access-Control-Allow-Headers', [
     'Origin',
@@ -402,7 +402,6 @@ const corsHandler = (req, res, next) => {
     'X-File-Size',
     'Content-Length'
   ].join(', '));
-  res.header('Access-Control-Allow-Credentials', 'true');
   res.header('Access-Control-Max-Age', '86400'); // 24 hours
   res.header('Access-Control-Expose-Headers', 'Content-Length, Content-Range, X-Session-ID, X-Upload-Status');
   
