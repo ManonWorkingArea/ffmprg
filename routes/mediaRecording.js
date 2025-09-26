@@ -3,6 +3,7 @@ const router = express.Router();
 const multer = require('multer');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs').promises;
+const fsSync = require('fs'); // For streams
 const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
 
@@ -1047,6 +1048,11 @@ The merge will proceed with available chunks but may result in a very short vide
     console.log(`   Timestamp issues: ${hasTimestampIssues ? 'YES (will fix)' : 'NO'}`);
     console.log(`   All MP4 format: ${allMP4 ? 'YES (fast concat mode)' : 'NO (mixed format)'}`);
     
+    // Use standard FFmpeg merge for all files to ensure compatibility
+    console.log(`🎬 Using standard FFmpeg merge (reliable method)...`);
+    
+    // Comment out fast mode temporarily - can be re-enabled later if needed
+    /*
     // Use fast MP4 concat if all files are MP4 and no timestamp issues
     if (allMP4 && !hasTimestampIssues) {
       console.log(`🚀 Using LIGHTNING FAST MP4 concat mode (binary concatenation)...`);
@@ -1071,6 +1077,7 @@ The merge will proceed with available chunks but may result in a very short vide
     } else {
       console.log(`⚠️  Fast mode disabled - Reason: ${!allMP4 ? 'Mixed formats detected' : 'Timestamp issues detected'}`);
     }
+    */
     
     // Use optimized FFmpeg strategy for mixed formats or timestamp issues
     return new Promise((resolve, reject) => {
@@ -1664,14 +1671,14 @@ async function tryBinaryConcatenation(chunkFiles, outputPath, startTime, expecte
   try {
     console.log(`🚀 Attempting pure binary concatenation...`);
     
-    const writeStream = fs.createWriteStream(outputPath);
+    const writeStream = fsSync.createWriteStream(outputPath);
     let totalBytes = 0;
     
     for (let i = 0; i < chunkFiles.length; i++) {
       const chunkPath = chunkFiles[i].path;
       console.log(`⚡ Concatenating chunk ${i + 1}/${chunkFiles.length}: ${path.basename(chunkPath)}`);
       
-      const readStream = fs.createReadStream(chunkPath);
+      const readStream = fsSync.createReadStream(chunkPath);
       
       await new Promise((resolve, reject) => {
         readStream.on('data', (chunk) => {
