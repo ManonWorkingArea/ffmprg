@@ -103,7 +103,8 @@ const initializeOnce = async () => {
 };
 
 /**
- * Enhanced chunk file validation with corruption detection and recovery
+ * Enhanced chunk file validation with MP4 and WebM support
+ * Now optimized for MP4 chunks (more reliable than WebM)
  */
 async function validateChunkFile(chunkPath) {
   try {
@@ -119,7 +120,7 @@ async function validateChunkFile(chunkPath) {
     }
     
     // Read more of the file header for better validation
-    const headerSize = Math.min(1024, stats.size);
+    const headerSize = Math.min(2048, stats.size); // Read more for MP4 detection
     const buffer = Buffer.alloc(headerSize);
     const fileHandle = await fs.open(chunkPath, 'r');
     
@@ -129,56 +130,84 @@ async function validateChunkFile(chunkPath) {
       await fileHandle.close();
     }
     
-    // Check for various video formats
+    // Check for various video formats (MP4 first, as it's more reliable)
     let formatDetected = 'unknown';
     let isValidFormat = false;
+    let confidence = 0;
     
-    // WebM/EBML signature
-    if (buffer.slice(0, 4).toString('hex') === '1a45dfa3') {
+    // MP4 signature (prioritized)
+    if (buffer.slice(4, 8).toString() === 'ftyp') {
+      formatDetected = 'mp4';
+      isValidFormat = true;
+      confidence = 10;
+      console.log(`✅ MP4 detected: ${path.basename(chunkPath)}`);
+    }
+    // MP4 variants and brands
+    else if (buffer.includes(Buffer.from('ftyp')) && (
+      buffer.includes(Buffer.from('mp41')) || 
+      buffer.includes(Buffer.from('mp42')) ||
+      buffer.includes(Buffer.from('isom')) ||
+      buffer.includes(Buffer.from('avc1')) ||
+      buffer.includes(Buffer.from('M4V'))
+    )) {
+      formatDetected = 'mp4';
+      isValidFormat = true;
+      confidence = 9;
+      console.log(`✅ MP4 variant detected: ${path.basename(chunkPath)}`);
+    }
+    // MOV signature (QuickTime)
+    else if (buffer.includes(Buffer.from('moov')) || buffer.includes(Buffer.from('mdat')) ||
+             buffer.slice(4, 8).toString() === 'wide') {
+      formatDetected = 'mov';
+      isValidFormat = true;
+      confidence = 8;
+      console.log(`✅ MOV detected: ${path.basename(chunkPath)}`);
+    }
+    // AVI signature
+    else if (buffer.slice(0, 4).toString() === 'RIFF' && buffer.slice(8, 12).toString() === 'AVI ') {
+      formatDetected = 'avi';
+      isValidFormat = true;
+      confidence = 8;
+      console.log(`✅ AVI detected: ${path.basename(chunkPath)}`);
+    }
+    // WebM/EBML signature (legacy support)
+    else if (buffer.slice(0, 4).toString('hex') === '1a45dfa3') {
       formatDetected = 'webm';
       
       // Check if EBML header is complete
       const ebmlHeaderEnd = buffer.indexOf(Buffer.from([0x18, 0x53, 0x80, 0x67])); // Segment marker
       if (ebmlHeaderEnd > 0 && ebmlHeaderEnd < 200) {
         isValidFormat = true;
+        confidence = 7;
+        console.log(`⚠️  WebM detected (legacy): ${path.basename(chunkPath)}`);
       } else {
+        confidence = 3;
         console.log(`⚠️  WebM detected but incomplete EBML header: ${path.basename(chunkPath)}`);
-        // Try to detect if it's a partially valid WebM
-        isValidFormat = buffer.length > 32; // At least some structure
       }
     }
-    // Check for WebM even without proper EBML signature (corrupted header)
-    else if (buffer.includes(Buffer.from('webm')) || buffer.includes(Buffer.from('VP8')) || buffer.includes(Buffer.from('VP9'))) {
-      formatDetected = 'webm-detected';
-      isValidFormat = true; // Try to recover
-      console.log(`🔍 WebM content detected without proper EBML: ${path.basename(chunkPath)}`);
+    // Partial formats that might be recoverable  
+    else if (buffer.includes(Buffer.from('mp4')) || buffer.includes(Buffer.from('M4V')) ||
+             buffer.includes(Buffer.from('h264')) || buffer.includes(Buffer.from('avc1'))) {
+      formatDetected = 'mp4-partial';
+      confidence = 6;
+      console.log(`⚠️  Partial MP4 detected: ${path.basename(chunkPath)}`);
     }
-    // MP4 signature
-    else if (buffer.slice(4, 8).toString() === 'ftyp') {
-      formatDetected = 'mp4';
-      isValidFormat = true;
+    else if (buffer.includes(Buffer.from('matroska')) || buffer.includes(Buffer.from('webm'))) {
+      formatDetected = 'webm-partial';
+      confidence = 2;
+      console.log(`⚠️  Partial WebM detected: ${path.basename(chunkPath)}`);
     }
-    // AVI signature
-    else if (buffer.slice(0, 4).toString() === 'RIFF' && buffer.slice(8, 12).toString() === 'AVI ') {
-      formatDetected = 'avi';
-      isValidFormat = true;
+    // Emergency detection for files that might be media
+    else if (stats.size > 10000) {
+      formatDetected = 'media-unknown';
+      confidence = 1;
+      console.log(`🔍 Large file detected, might be recoverable media: ${path.basename(chunkPath)}`);
     }
-    // Raw video data patterns (emergency detection)
-    else if (stats.size > 10000 && (
-      buffer.includes(Buffer.from('matroska')) || 
-      buffer.includes(Buffer.from('libvpx')) ||
-      buffer.includes(Buffer.from([0x9f, 0x01, 0x2f])) || // Common WebM patterns
-      (buffer[0] === 0x1a && buffer.length > 100) // Possible corrupted EBML
-    )) {
-      formatDetected = 'webm-raw';
-      isValidFormat = true; // Force recovery attempt
-      console.log(`🔍 Raw WebM-like data detected: ${path.basename(chunkPath)}`);
-    }
-    // Fallback for files that might be recoverable
-    else if (stats.size > 5000) {
-      formatDetected = 'unknown-recoverable';
+    
+    // Validate format strength
+    if (confidence < 5) {
       isValidFormat = false;
-      console.log(`🔍 Unknown format but size suggests video data: ${path.basename(chunkPath)} (${stats.size} bytes)`);
+      console.log(`🔍 Low confidence format (${confidence}/10): ${path.basename(chunkPath)} - ${formatDetected}`);
     }
     
     // Try ffprobe with error recovery
@@ -205,24 +234,32 @@ async function validateChunkFile(chunkPath) {
     
     // If ffprobe failed, analyze what we can recover
     if (!metadata) {
-      const canRecover = formatDetected.includes('webm') || 
+      const canRecover = formatDetected.includes('mp4') ||
+                        formatDetected.includes('mov') ||
+                        formatDetected.includes('webm') || 
                         formatDetected.includes('recoverable') ||
+                        formatDetected.includes('media') ||
                         isValidFormat || 
                         stats.size > 5000; // Any substantial file
       
       let recoveryStrategy = 'skip';
-      if (formatDetected.includes('webm')) {
-        recoveryStrategy = 'aggressive-reprocess';
-      } else if (formatDetected.includes('recoverable') || stats.size > 10000) {
-        recoveryStrategy = 'force-webm';
+      if (formatDetected.includes('mp4')) {
+        recoveryStrategy = 'mp4-repair';
+      } else if (formatDetected.includes('mov') || formatDetected.includes('avi')) {
+        recoveryStrategy = 'reprocess-container';
+      } else if (formatDetected.includes('webm')) {
+        recoveryStrategy = 'webm-reprocess';
+      } else if (formatDetected.includes('media') || stats.size > 10000) {
+        recoveryStrategy = 'force-mp4';
       }
       
       return {
         isValid: false,
-        error: `FFprobe failed: ${ffprobeError}. Format: ${formatDetected}`,
+        error: `FFprobe failed: ${ffprobeError}. Format: ${formatDetected} (confidence: ${confidence})`,
         format: formatDetected,
         canRecover: canRecover,
         size: stats.size,
+        confidence: confidence,
         recoveryStrategy: recoveryStrategy
       };
     }
@@ -237,7 +274,8 @@ async function validateChunkFile(chunkPath) {
         format: formatDetected,
         canRecover: true,
         size: stats.size,
-        recoveryStrategy: 'reprocess'
+        confidence: confidence,
+        recoveryStrategy: formatDetected.includes('mp4') ? 'mp4-repair' : 'reprocess'
       };
     }
     
@@ -247,10 +285,12 @@ async function validateChunkFile(chunkPath) {
       console.log(`⚠️  Zero duration detected in ${path.basename(chunkPath)}`);
     }
     
-    // Success case
+    // Success case - MP4 format is preferred
+    console.log(`✅ Successfully validated ${formatDetected.toUpperCase()} chunk: ${path.basename(chunkPath)} (confidence: ${confidence}/10)`);
     return {
       isValid: true,
       format: formatDetected,
+      confidence: confidence,
       codec: videoStream.codec_name || 'unknown',
       resolution: videoStream.width && videoStream.height ? 
         `${videoStream.width}x${videoStream.height}` : 'unknown',
@@ -285,7 +325,133 @@ async function recoverChunkFile(chunkPath, recoveryStrategy = 'reprocess') {
     // Create backup
     await fs.copyFile(chunkPath, backupPath);
     
-    if (recoveryStrategy === 'aggressive-reprocess') {
+    if (recoveryStrategy === 'mp4-repair') {
+      // MP4-specific repair with ftyp header reconstruction
+      return new Promise((resolve, reject) => {
+        ffmpeg(chunkPath)
+          .inputOptions([
+            '-err_detect', 'ignore_err',
+            '-fflags', '+genpts+igndts',
+            '-analyzeduration', '2000000',   // Longer analysis for MP4
+            '-probesize', '8000000',         // Larger probe size
+            '-f', 'mp4'                      // Force MP4 input format
+          ])
+          .outputOptions([
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-crf', '28',                    // Good quality for MP4
+            '-pix_fmt', 'yuv420p',
+            '-movflags', 'faststart+empty_moov+default_base_moof',
+            '-avoid_negative_ts', 'make_zero',
+            '-frag_duration', '1000000',     // MP4 fragmentation
+            '-max_muxing_queue_size', '2048'
+          ])
+          .output(recoveredPath)
+          .on('end', async () => {
+            try {
+              const stats = await fs.stat(recoveredPath);
+              if (stats.size > 1000) {
+                await fs.rename(recoveredPath, chunkPath);
+                console.log(`✅ MP4 repair successful: ${path.basename(chunkPath)}`);
+                resolve({ success: true, method: 'mp4-repair' });
+              } else {
+                resolve({ success: false, error: 'Recovered MP4 file too small' });
+              }
+            } catch (error) {
+              resolve({ success: false, error: `Failed to replace recovered MP4: ${error.message}` });
+            }
+          })
+          .on('error', (error) => {
+            console.log(`❌ MP4 repair failed: ${error.message}`);
+            resolve({ success: false, error: error.message });
+          })
+          .run();
+      });
+    }
+    
+    else if (recoveryStrategy === 'force-mp4') {
+      // Force treating as MP4 and extract video data
+      return new Promise((resolve, reject) => {
+        ffmpeg(chunkPath)
+          .inputOptions([
+            '-f', 'mp4',                     // Force MP4 format
+            '-err_detect', 'ignore_err',
+            '-fflags', '+genpts',
+            '-analyzeduration', '1500000',
+            '-probesize', '6000000'
+          ])
+          .outputOptions([
+            '-c:v', 'copy',                  // Try to copy stream first
+            '-movflags', 'faststart',
+            '-avoid_negative_ts', 'make_zero',
+            '-bsf:v', 'h264_mp4toannexb'    // Convert H.264 format
+          ])
+          .output(recoveredPath)
+          .on('end', async () => {
+            try {
+              const stats = await fs.stat(recoveredPath);
+              if (stats.size > 500) {
+                await fs.rename(recoveredPath, chunkPath);
+                console.log(`✅ Force MP4 recovery successful: ${path.basename(chunkPath)}`);
+                resolve({ success: true, method: 'force-mp4' });
+              } else {
+                resolve({ success: false, error: 'Force MP4 recovered file too small' });
+              }
+            } catch (error) {
+              resolve({ success: false, error: `Failed to replace force MP4 file: ${error.message}` });
+            }
+          })
+          .on('error', (error) => {
+            console.log(`❌ Force MP4 recovery failed: ${error.message}`);
+            resolve({ success: false, error: error.message });
+          })
+          .run();
+      });
+    }
+    
+    else if (recoveryStrategy === 'reprocess-container') {
+      // For MOV/AVI files - repackage into MP4
+      return new Promise((resolve, reject) => {
+        ffmpeg(chunkPath)
+          .inputOptions([
+            '-err_detect', 'ignore_err',
+            '-fflags', '+genpts',
+            '-analyzeduration', '1000000',
+            '-probesize', '5000000'
+          ])
+          .outputOptions([
+            '-c:v', 'libx264',
+            '-c:a', 'aac',
+            '-preset', 'fast',
+            '-crf', '30',
+            '-movflags', 'faststart',
+            '-f', 'mp4'                      // Force MP4 output
+          ])
+          .output(recoveredPath)
+          .on('end', async () => {
+            try {
+              const stats = await fs.stat(recoveredPath);
+              if (stats.size > 1000) {
+                await fs.rename(recoveredPath, chunkPath);
+                console.log(`✅ Container reprocess to MP4 successful: ${path.basename(chunkPath)}`);
+                resolve({ success: true, method: 'reprocess-container' });
+              } else {
+                resolve({ success: false, error: 'Container reprocess file too small' });
+              }
+            } catch (error) {
+              resolve({ success: false, error: `Failed to replace container reprocess: ${error.message}` });
+            }
+          })
+          .on('error', (error) => {
+            console.log(`❌ Container reprocess failed: ${error.message}`);
+            resolve({ success: false, error: error.message });
+          })
+          .run();
+      });
+    }
+    
+    else if (recoveryStrategy === 'webm-reprocess') {
+      // WebM reprocessing (legacy support)
       // Very aggressive reprocessing with error tolerance
       return new Promise((resolve, reject) => {
         ffmpeg(chunkPath)
@@ -337,18 +503,19 @@ async function recoverChunkFile(chunkPath, recoveryStrategy = 'reprocess') {
             '-f', 'matroska,webm',          // Force WebM format
             '-err_detect', 'ignore_err',
             '-fflags', '+genpts+igndts',
-            '-analyzeduration', '2000000',   // Analyze even longer
+            '-analyzeduration', '2000000',   // Analyze longer
             '-probesize', '10000000'
           ])
           .outputOptions([
             '-c:v', 'libx264',
             '-preset', 'ultrafast',
-            '-crf', '35',                   // Even lower quality
+            '-crf', '35',                   // Lower quality for WebM
             '-pix_fmt', 'yuv420p',
             '-movflags', 'faststart',
             '-avoid_negative_ts', 'make_zero',
             '-vsync', 'drop',
             '-r', '15',                     // Lower frame rate
+            '-f', 'mp4',                    // Output as MP4 for better compatibility
             '-max_muxing_queue_size', '1024'
           ])
           .output(recoveredPath)
@@ -516,14 +683,14 @@ async function waitForChunks(sessionId, expectedChunks, maxWaitSeconds = 30) {
  * Enhanced merge function with WebM duration fixes
  * Addresses specific WebM timestamp and duration issues
  */
-async function mergeVideoChunksWithWebMFix(sessionId, sessionData) {
+async function mergeVideoChunksWithFormat(sessionId, sessionData) {
   try {
     const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
     const sessionDir = path.join(sessionsDir, sessionId);
     const chunksDir = path.join(sessionDir, 'chunks');
     const outputPath = path.join(sessionDir, `${sessionId}_final.mp4`);
     
-    console.log(`🎬 Starting WebM-optimized merge for session: ${sessionId}`);
+    console.log(`🎬 Starting MP4-optimized merge for session: ${sessionId}`);
     console.log(`📁 Chunks directory: ${chunksDir}`);
     console.log(`📤 Output file: ${outputPath}`);
     
@@ -666,7 +833,7 @@ Suggestions:
           try {
             // Try emergency recovery with very aggressive settings
             console.log(`🔧 Emergency recovery for: ${chunk.filename}`);
-            const recoveryResult = await recoverChunkFile(chunkPath, 'force-webm');
+            const recoveryResult = await recoverChunkFile(chunkPath, 'force-mp4');
             
             if (recoveryResult.success) {
               // Re-validate the recovered chunk
@@ -902,7 +1069,7 @@ The merge will proceed with available chunks but may result in a very short vide
     });
     
   } catch (error) {
-    console.error(`❌ Error in mergeVideoChunksWithWebMFix: ${error.message}`);
+    console.error(`❌ Error in mergeVideoChunksWithFormat: ${error.message}`);
     throw error;
   }
 }
@@ -1632,8 +1799,8 @@ router.post('/recording/finalize', async (req, res) => {
     console.log(`🔀 Starting video merge for ${sessionData.chunks.length} chunks...`);
     
     try {
-      // Use enhanced merge function that handles WebM duration issues
-      const mergeResult = await mergeVideoChunksWithWebMFix(sessionId, sessionData);
+      // Use enhanced merge function that handles MP4/WebM format issues
+      const mergeResult = await mergeVideoChunksWithFormat(sessionId, sessionData);
       
       console.log(`✅ Video merge completed successfully!`);
       console.log(`📊 Final video: ${mergeResult.sizeMB}MB, ${mergeResult.actualDuration.toFixed(2)}s`);
@@ -1895,7 +2062,7 @@ router.post('/recording/finalize-async', async (req, res) => {
       };
       
       // Merge video
-      const mergeResult = await mergeVideoChunksWithWebMFix(sessionId, sessionData);
+      const mergeResult = await mergeVideoChunksWithFormat(sessionId, sessionData);
       
       console.log(`✅ Job ${jobId} completed successfully`);
       
