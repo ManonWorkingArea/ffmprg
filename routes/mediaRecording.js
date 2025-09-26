@@ -607,10 +607,10 @@ async function waitForChunks(sessionId, expectedChunks, maxWaitSeconds = 30) {
   
   while (attempts < maxAttempts) {
     try {
-      // Check current chunk count
+      // Check current chunk count (support both MP4 and WebM for backward compatibility)
       const files = await fs.readdir(chunksDir);
-      const webmFiles = files.filter(file => file.endsWith('.webm'));
-      const currentCount = webmFiles.length;
+      const videoFiles = files.filter(file => file.endsWith('.mp4') || file.endsWith('.webm'));
+      const currentCount = videoFiles.length;
       
       console.log(`🔍 Attempt ${attempts + 1}: Found ${currentCount}/${expectedChunks} chunks`);
       
@@ -655,8 +655,8 @@ async function waitForChunks(sessionId, expectedChunks, maxWaitSeconds = 30) {
   // Timeout reached - get final count
   try {
     const files = await fs.readdir(chunksDir);
-    const webmFiles = files.filter(file => file.endsWith('.webm'));
-    const finalCount = webmFiles.length;
+    const videoFiles = files.filter(file => file.endsWith('.mp4') || file.endsWith('.webm'));
+    const finalCount = videoFiles.length;
     
     const elapsedSeconds = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`⏰ Timeout reached after ${elapsedSeconds}s: ${finalCount}/${expectedChunks} chunks`);
@@ -1607,7 +1607,7 @@ router.post('/recording/chunk', upload.single('chunk'), async (req, res) => {
     
     // Move chunk to session directory
     const chunksDir = sessionData.directories.chunksDir;
-    const chunkFilename = `chunk-${String(chunkIndex).padStart(4, '0')}.webm`;
+    const chunkFilename = `chunk-${String(chunkIndex).padStart(4, '0')}.mp4`;
     const chunkPath = path.join(chunksDir, chunkFilename);
     
     try {
@@ -1741,7 +1741,7 @@ router.post('/recording/finalize', async (req, res) => {
       // Get actual chunk files from directory with enhanced sorting
       const chunkFiles = await fs.readdir(chunksDir);
       const actualChunks = chunkFiles
-        .filter(file => file.endsWith('.webm'))
+        .filter(file => file.endsWith('.mp4') || file.endsWith('.webm'))
         .map((filename) => {
           // Extract chunk number from filename
           const chunkMatch = filename.match(/chunk-(\d+)/) || filename.match(/(\d+)/);
@@ -1913,11 +1913,11 @@ router.get('/session/:sessionId/chunks/status', async (req, res) => {
     try {
       // Get current chunks
       const files = await fs.readdir(chunksDir);
-      const webmFiles = files.filter(file => file.endsWith('.webm'));
+      const videoFiles = files.filter(file => file.endsWith('.mp4') || file.endsWith('.webm'));
       
       // Analyze chunk details
       const chunkDetails = [];
-      for (const filename of webmFiles) {
+      for (const filename of videoFiles) {
         const filePath = path.join(chunksDir, filename);
         const stats = await fs.stat(filePath);
         
@@ -2040,7 +2040,7 @@ router.post('/recording/finalize-async', async (req, res) => {
       
       const chunkFiles = await fs.readdir(chunksDir);
       const actualChunks = chunkFiles
-        .filter(file => file.endsWith('.webm'))
+        .filter(file => file.endsWith('.mp4') || file.endsWith('.webm'))
         .map((filename) => {
           const chunkMatch = filename.match(/chunk-(\d+)/) || filename.match(/(\d+)/);
           const chunkIndex = chunkMatch ? parseInt(chunkMatch[1]) : 999999;
