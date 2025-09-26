@@ -100,6 +100,16 @@ app.use(express.urlencoded({ limit: '50mb', extended: true })); // เพิ่�
 app.use(express.static('public'));
 app.use(express.static('outputs'));
 
+// Import and use media recording routes
+const mediaRecordingRoutes = require('./routes/mediaRecording');
+const { requestLogger, performanceMonitor, corsHandler } = require('./middleware/mediaRecording');
+
+// Apply media recording middleware and routes
+app.use('/api/media', corsHandler);
+app.use('/api/media', requestLogger);
+app.use('/api/media', performanceMonitor);
+app.use('/api/media', mediaRecordingRoutes);
+
 // ปรับปรุงการตั้งค่า multer สำหรับไฟล์ใหญ่
 const upload = multer({ 
   dest: 'uploads/',
