@@ -175,7 +175,8 @@ const saveChunk = async (sessionId, chunkIndex, chunkFile, metadata) => {
  * Creates a new recording session with dummy response fallback
  * Creates session directory and JSON metadata file
  */
-router.post('/init', async (req, res) => {
+router.post('/recording/init', async (req, res) => {
+  console.log('🎯 Route /recording/init hit!');
   try {
     const { sessionId, timestamp, dummyMode } = req.body;
     
@@ -260,7 +261,8 @@ router.post('/init', async (req, res) => {
  * Converts chunks to .webm format and saves to session directory
  * Updates session JSON with chunk information
  */
-router.post('/chunk', upload.single('chunk'), async (req, res) => {
+router.post('/recording/chunk', upload.single('chunk'), async (req, res) => {
+  console.log('🎯 Route /recording/chunk hit!');
   try {
     const { sessionId, chunkIndex, metadata, dummyMode } = req.body;
     const chunkFile = req.file;
@@ -389,7 +391,8 @@ router.post('/chunk', upload.single('chunk'), async (req, res) => {
  * Finalizes recording session and prepares final video output
  * Updates session JSON with final status
  */
-router.post('/finalize', async (req, res) => {
+router.post('/recording/finalize', async (req, res) => {
+  console.log('🎯 Route /recording/finalize hit!');
   try {
     const { sessionId, totalChunks, totalSize, chunks: clientChunks, dummyMode } = req.body;
     
@@ -786,5 +789,13 @@ setInterval(async () => {
     console.error('❌ Error during session cleanup:', error);
   }
 }, 30 * 60 * 1000); // 30 minutes
+
+console.log('📡 Media recording routes initialized:');
+console.log('  - POST /recording/init');
+console.log('  - POST /recording/chunk');
+console.log('  - POST /recording/finalize');
+console.log('  - GET  /recording/session/:sessionId');
+console.log('  - GET  /recording/sessions');
+console.log('  - DELETE /recording/session/:sessionId');
 
 module.exports = router;
