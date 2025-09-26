@@ -4,6 +4,7 @@ const multer = require('multer');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs').promises;
 const path = require('path');
+const ffmpeg = require('fluent-ffmpeg');
 
 // Configure multer for chunk uploads with increased limits for 4K@60fps video
 const upload = multer({ 
@@ -760,19 +761,81 @@ router.post('/recording/finalize', async (req, res) => {
     logRequest('/api/media/recording/finalize', 
       `Session ${sessionId} finalized: ${totalChunks} chunks, ${(totalSize / 1024 / 1024).toFixed(2)}MB`, 'success');
     
-    // Return dummy response with real HTTP request note
+    // Process video chunks with FFmpeg
+    let mergeResult = null;
+    let cleanupResult = null;
+    let processingNote = dummyMode ? "Real HTTP request attempted but server not available" : "Session finalized successfully";
+    
+    try {
+      if (sessionData.chunks && sessionData.chunks.length > 0) {
+        console.log(`🎬 Starting video processing for ${sessionData.chunks.length} chunks`);
+        
+        // Merge video chunks using FFmpeg
+        mergeResult = await mergeVideoChunks(sessionId, sessionData);
+        console.log(`✅ Video merge successful:`, mergeResult);
+        
+        // Clean up chunk files after successful merge
+        if (mergeResult.success) {
+          cleanupResult = await cleanupChunkFiles(sessionId, sessionData);
+          console.log(`✅ Cleanup successful:`, cleanupResult);
+          
+          // Update session with merge results
+          sessionData.videoProcessing = {
+            merged: true,
+            mergedAt: new Date().toISOString(),
+            finalVideoPath: mergeResult.outputPath,
+            finalVideoSizeMB: mergeResult.sizeMB,
+            mergeDurationSeconds: mergeResult.duration,
+            chunksProcessed: mergeResult.chunksProcessed,
+            cleanup: {
+              deletedFiles: cleanupResult.deletedFiles,
+              spacesFreedMB: cleanupResult.totalSizeFreedMB
+            }
+          };
+          
+          // Save updated session with video processing info
+          await saveSessionMetadata(sessionId, sessionData);
+          sessions.set(sessionId, sessionData);
+          
+          processingNote = `Video merged successfully: ${mergeResult.chunksProcessed} chunks → ${mergeResult.sizeMB}MB MP4, ${cleanupResult.deletedFiles} chunk files cleaned up`;
+        }
+        
+      } else {
+        console.warn(`⚠️  No chunks found for session ${sessionId}, skipping video processing`);
+        processingNote += " (No chunks to process)";
+      }
+      
+    } catch (videoError) {
+      console.error(`❌ Video processing failed for session ${sessionId}:`, videoError);
+      processingNote += ` (Video processing failed: ${videoError.message})`;
+      
+      // Update session with error info
+      sessionData.videoProcessing = {
+        merged: false,
+        error: videoError.message,
+        errorAt: new Date().toISOString()
+      };
+      
+      await saveSessionMetadata(sessionId, sessionData);
+      sessions.set(sessionId, sessionData);
+    }
+    
+    // Return response with video processing results
     const response = {
       success: true,
       sessionId,
       status: 'completed',
-      finalVideoUrl: `/dummy/final/${sessionId}_final.mp4`,
+      finalVideoUrl: mergeResult && mergeResult.success 
+        ? `/api/media/recording/session/${sessionId}/video` 
+        : `/dummy/final/${sessionId}_final.mp4`,
       actualChunksPath: `/api/media/recording/session/${sessionId}/chunks`,
       totalChunks: sessionData.totalChunks,
       totalSizeMB: parseFloat((sessionData.totalSize / 1024 / 1024).toFixed(1)),
       finalizedAt: sessionData.finalizedAt,
       processingTime: calculateProcessingTime(sessionData.createdAt, sessionData.finalizedAt),
       failedChunks: sessionData.failedChunks,
-      note: dummyMode ? "Real HTTP request attempted but server not available" : "Session finalized successfully"
+      videoProcessing: sessionData.videoProcessing || { merged: false, note: "No chunks to process" },
+      note: processingNote
     };
     
     res.json(response);
@@ -1042,6 +1105,272 @@ router.get('/status', async (req, res) => {
     });
   }
 });
+
+/**
+ * Download Final Video
+ * GET /api/media/recording/session/:sessionId/video
+ * 
+ * Serves the final merged MP4 video file
+ */
+router.get('/session/:sessionId/video', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    
+    console.log(`📹 Video download request for session: ${sessionId}`);
+    
+    const sessionData = await loadSessionMetadata(sessionId);
+    if (!sessionData) {
+      return res.status(404).json({
+        success: false,
+        error: 'Session not found',
+        sessionId
+      });
+    }
+    
+    // Check if video processing was completed
+    if (!sessionData.videoProcessing || !sessionData.videoProcessing.merged) {
+      return res.status(404).json({
+        success: false,
+        error: 'Final video not available. Video processing may have failed or not been completed.',
+        sessionId,
+        videoProcessing: sessionData.videoProcessing || { status: 'not_processed' }
+      });
+    }
+    
+    const videoPath = sessionData.videoProcessing.finalVideoPath;
+    
+    // Check if video file exists
+    try {
+      await fs.access(videoPath);
+      const stats = await fs.stat(videoPath);
+      
+      console.log(`📤 Serving video: ${videoPath} (${(stats.size / 1024 / 1024).toFixed(2)}MB)`);
+      
+      // Set appropriate headers for video download
+      res.setHeader('Content-Type', 'video/mp4');
+      res.setHeader('Content-Length', stats.size);
+      res.setHeader('Content-Disposition', `attachment; filename="${sessionId}_final.mp4"`);
+      res.setHeader('Accept-Ranges', 'bytes');
+      
+      // Stream the file
+      const readStream = require('fs').createReadStream(videoPath);
+      
+      readStream.on('error', (streamError) => {
+        console.error(`❌ Stream error: ${streamError.message}`);
+        if (!res.headersSent) {
+          res.status(500).json({
+            success: false,
+            error: 'Error streaming video file',
+            details: streamError.message
+          });
+        }
+      });
+      
+      readStream.pipe(res);
+      
+    } catch (fileError) {
+      console.error(`❌ Video file not accessible: ${videoPath}`, fileError);
+      return res.status(404).json({
+        success: false,
+        error: 'Video file not found on disk',
+        sessionId,
+        expectedPath: videoPath,
+        details: fileError.message
+      });
+    }
+    
+  } catch (error) {
+    console.error('❌ Error serving video:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      details: error.message
+    });
+  }
+});
+
+/**
+ * Merge video chunks using FFmpeg
+ * Combines WebM chunks into a single MP4 file
+ */
+async function mergeVideoChunks(sessionId, sessionData) {
+  try {
+    const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
+    const sessionDir = path.join(sessionsDir, sessionId);
+    const chunksDir = path.join(sessionDir, 'chunks');
+    const outputPath = path.join(sessionDir, `${sessionId}_final.mp4`);
+    
+    console.log(`🎬 Starting video merge for session: ${sessionId}`);
+    console.log(`📁 Chunks directory: ${chunksDir}`);
+    console.log(`📤 Output file: ${outputPath}`);
+    
+    // Check if chunks directory exists
+    try {
+      await fs.access(chunksDir);
+    } catch (error) {
+      throw new Error(`Chunks directory not found: ${chunksDir}`);
+    }
+    
+    // Get all chunk files and sort them by index
+    const chunkFiles = [];
+    for (const chunk of sessionData.chunks) {
+      const chunkPath = path.join(chunksDir, chunk.filename);
+      try {
+        await fs.access(chunkPath);
+        chunkFiles.push({
+          index: chunk.chunkIndex,
+          path: chunkPath,
+          filename: chunk.filename
+        });
+        console.log(`✅ Found chunk ${chunk.chunkIndex}: ${chunk.filename}`);
+      } catch (error) {
+        console.warn(`⚠️  Chunk file not found: ${chunkPath}`);
+      }
+    }
+    
+    if (chunkFiles.length === 0) {
+      throw new Error('No chunk files found to merge');
+    }
+    
+    // Sort chunks by index
+    chunkFiles.sort((a, b) => a.index - b.index);
+    console.log(`🔢 Merging ${chunkFiles.length} chunks in order`);
+    
+    // Create a file list for FFmpeg concat demuxer
+    const fileListPath = path.join(sessionDir, 'filelist.txt');
+    const fileListContent = chunkFiles
+      .map(chunk => `file '${path.relative(sessionDir, chunk.path)}'`)
+      .join('\n');
+    
+    await fs.writeFile(fileListPath, fileListContent, 'utf8');
+    console.log(`📝 Created file list: ${fileListPath}`);
+    console.log(`📋 File list content:\n${fileListContent}`);
+    
+    // Use FFmpeg to merge chunks
+    return new Promise((resolve, reject) => {
+      const startTime = Date.now();
+      
+      ffmpeg()
+        .input(fileListPath)
+        .inputOptions(['-f', 'concat', '-safe', '0'])
+        .outputOptions([
+          '-c', 'copy',           // Copy streams without re-encoding for speed
+          '-avoid_negative_ts', 'make_zero', // Handle timestamp issues
+          '-fflags', '+genpts'    // Generate presentation timestamps
+        ])
+        .output(outputPath)
+        .on('start', (commandLine) => {
+          console.log(`🚀 FFmpeg started: ${commandLine}`);
+        })
+        .on('progress', (progress) => {
+          if (progress.percent) {
+            console.log(`⏳ FFmpeg progress: ${Math.round(progress.percent)}%`);
+          }
+        })
+        .on('end', async () => {
+          const endTime = Date.now();
+          const duration = ((endTime - startTime) / 1000).toFixed(2);
+          console.log(`✅ Video merge completed in ${duration}s`);
+          
+          try {
+            // Check output file
+            const stats = await fs.stat(outputPath);
+            const sizeMB = (stats.size / 1024 / 1024).toFixed(2);
+            console.log(`📊 Final video size: ${sizeMB}MB`);
+            
+            // Clean up temporary files
+            try {
+              await fs.unlink(fileListPath);
+              console.log(`🗑️  Removed temporary file list: ${fileListPath}`);
+            } catch (cleanupError) {
+              console.warn(`⚠️  Could not remove file list: ${cleanupError.message}`);
+            }
+            
+            resolve({
+              success: true,
+              outputPath,
+              sizeMB: parseFloat(sizeMB),
+              duration: parseFloat(duration),
+              chunksProcessed: chunkFiles.length
+            });
+            
+          } catch (statError) {
+            reject(new Error(`Failed to verify output file: ${statError.message}`));
+          }
+        })
+        .on('error', (error) => {
+          console.error(`❌ FFmpeg error: ${error.message}`);
+          reject(new Error(`Video merge failed: ${error.message}`));
+        })
+        .run();
+    });
+    
+  } catch (error) {
+    console.error(`❌ Error in mergeVideoChunks: ${error.message}`);
+    throw error;
+  }
+}
+
+/**
+ * Clean up chunk files after successful merge
+ */
+async function cleanupChunkFiles(sessionId, sessionData) {
+  try {
+    const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
+    const sessionDir = path.join(sessionsDir, sessionId);
+    const chunksDir = path.join(sessionDir, 'chunks');
+    
+    console.log(`🧹 Starting cleanup for session: ${sessionId}`);
+    
+    let deletedFiles = 0;
+    let totalSizeFreed = 0;
+    
+    for (const chunk of sessionData.chunks) {
+      const chunkPath = path.join(chunksDir, chunk.filename);
+      
+      try {
+        const stats = await fs.stat(chunkPath);
+        await fs.unlink(chunkPath);
+        
+        deletedFiles++;
+        totalSizeFreed += stats.size;
+        console.log(`🗑️  Deleted chunk: ${chunk.filename} (${(stats.size / 1024 / 1024).toFixed(2)}MB)`);
+        
+      } catch (error) {
+        if (error.code === 'ENOENT') {
+          console.warn(`⚠️  Chunk file already deleted: ${chunkPath}`);
+        } else {
+          console.error(`❌ Failed to delete chunk: ${chunkPath} - ${error.message}`);
+        }
+      }
+    }
+    
+    // Try to remove empty chunks directory
+    try {
+      const remainingFiles = await fs.readdir(chunksDir);
+      if (remainingFiles.length === 0) {
+        await fs.rmdir(chunksDir);
+        console.log(`🗑️  Removed empty chunks directory: ${chunksDir}`);
+      } else {
+        console.log(`📁 Chunks directory not empty, keeping: ${remainingFiles.length} files remaining`);
+      }
+    } catch (error) {
+      console.warn(`⚠️  Could not remove chunks directory: ${error.message}`);
+    }
+    
+    const totalSizeFreedMB = (totalSizeFreed / 1024 / 1024).toFixed(2);
+    console.log(`✅ Cleanup completed: ${deletedFiles} files deleted, ${totalSizeFreedMB}MB freed`);
+    
+    return {
+      deletedFiles,
+      totalSizeFreedMB: parseFloat(totalSizeFreedMB)
+    };
+    
+  } catch (error) {
+    console.error(`❌ Error in cleanupChunkFiles: ${error.message}`);
+    throw error;
+  }
+}
 
 // Utility function to calculate processing time
 function calculateProcessingTime(startTime, endTime) {
