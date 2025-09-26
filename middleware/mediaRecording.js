@@ -377,49 +377,11 @@ const performanceMonitor = (req, res, next) => {
   next();
 };
 
-/**
- * Public CORS middleware for media recording endpoints - Allow all origins
- */
-const corsHandler = (req, res, next) => {
-  const origin = req.headers.origin;
-  
-  console.log(`🌐 CORS: ${req.method} ${req.originalUrl} from origin: ${origin || 'none'} → allowed: all origins`);
-  
-  // Set CORS headers to allow all origins (do not set credentials when origin is '*')
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-  res.header('Access-Control-Allow-Headers', [
-    'Origin',
-    'X-Requested-With', 
-    'Content-Type',
-    'Accept',
-    'Authorization',
-    'Cache-Control',
-    'X-Session-ID',
-    'X-Chunk-Index',
-    'X-Total-Chunks',
-    'X-File-Name',
-    'X-File-Size',
-    'Content-Length'
-  ].join(', '));
-  res.header('Access-Control-Max-Age', '86400'); // 24 hours
-  res.header('Access-Control-Expose-Headers', 'Content-Length, Content-Range, X-Session-ID, X-Upload-Status');
-  
-  // Handle preflight requests
-  if (req.method === 'OPTIONS') {
-    console.log('✈️  Preflight request handled successfully - all origins allowed');
-    return res.status(200).end();
-  } else {
-    next();
-  }
-};
-
 module.exports = {
   VideoChunkManagerSimulator,
   requestLogger,
   validateSession,
   validateChunk,
   errorHandler,
-  performanceMonitor,
-  corsHandler
+  performanceMonitor
 };

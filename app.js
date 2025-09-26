@@ -1,7 +1,6 @@
 const express = require('express');
 const multer = require('multer');
 const ffmpeg = require('fluent-ffmpeg');
-const cors = require('cors');
 const path = require('path');
 const { createClient } = require('redis');
 const { v4: uuidv4 } = require('uuid');
@@ -93,32 +92,6 @@ const CLOUDFLARE_API_BASE = 'https://api.cloudflare.com/client/v4';
 
 const app = express();
 const port = process.env.PORT || 3000;
-
-// Public CORS configuration - Allow all origins for development and testing
-const corsOptions = {
-  origin: '*', // Allow all origins (simplified)
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
-  allowedHeaders: [
-    'Origin',
-    'X-Requested-With', 
-    'Content-Type',
-    'Accept',
-    'Authorization',
-    'Cache-Control',
-    'X-Session-ID',
-    'X-Chunk-Index',
-    'X-Total-Chunks',
-    'X-File-Name',
-    'X-File-Size',
-    'Content-Length'
-  ],
-  credentials: false, // Must be false when origin is '*'
-  maxAge: 86400, // 24 hours preflight cache
-  optionsSuccessStatus: 200,
-  preflightContinue: false
-};
-
-app.use(cors(corsOptions));
 
 // Logging middleware for media recording endpoints
 app.use('/api/media', (req, res, next) => {
