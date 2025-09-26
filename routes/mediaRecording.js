@@ -768,6 +768,267 @@ router.use(async (req, res, next) => {
 });
 
 /**
+ * Initialize a new recording session
+ * POST /recording/init
+ */
+router.post('/recording/init', async (req, res) => {
+  console.log('🎬 Initializing new recording session...');
+  try {
+    const { 
+      sessionId = uuidv4(), 
+      metadata = {},
+      expectedDuration,
+      expectedChunks,
+      videoSettings = {}
+    } = req.body;
+    
+    console.log(`🆕 Creating session: ${sessionId}`);
+    
+    // Check if session already exists
+    if (activeSessions.has(sessionId)) {
+      console.log(`⚠️  Session already exists: ${sessionId}`);
+      return res.json({
+        success: true,
+        sessionId,
+        status: 'existing',
+        message: 'Session already initialized',
+        session: activeSessions.get(sessionId)
+      });
+    }
+    
+    // Create session directories
+    const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
+    const sessionDir = path.join(sessionsDir, sessionId);
+    const chunksDir = path.join(sessionDir, 'chunks');
+    
+    try {
+      await fs.mkdir(sessionDir, { recursive: true });
+      await fs.mkdir(chunksDir, { recursive: true });
+      console.log(`📁 Created session directories: ${sessionDir}`);
+    } catch (dirError) {
+      console.error(`❌ Failed to create session directories: ${dirError.message}`);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to create session directories',
+        details: dirError.message
+      });
+    }
+    
+    // Create session data
+    const sessionData = {
+      sessionId,
+      status: 'initialized',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      metadata: {
+        userAgent: req.get('User-Agent'),
+        clientIP: req.ip || req.connection.remoteAddress,
+        ...metadata
+      },
+      expectedDuration,
+      expectedChunks,
+      videoSettings: {
+        format: 'webm',
+        codec: 'vp8',
+        quality: 'medium',
+        ...videoSettings
+      },
+      chunks: [],
+      totalChunks: 0,
+      totalSize: 0,
+      directories: {
+        sessionDir,
+        chunksDir
+      },
+      stats: {
+        chunksReceived: 0,
+        chunksValidated: 0,
+        totalBytesReceived: 0,
+        lastChunkAt: null
+      }
+    };
+    
+    // Save session metadata to disk
+    try {
+      const metadataPath = path.join(sessionDir, 'session.json');
+      await fs.writeFile(metadataPath, JSON.stringify(sessionData, null, 2));
+      console.log(`💾 Saved session metadata: ${metadataPath}`);
+    } catch (saveError) {
+      console.warn(`⚠️  Failed to save session metadata: ${saveError.message}`);
+    }
+    
+    // Store in memory
+    activeSessions.set(sessionId, sessionData);
+    
+    console.log(`✅ Session initialized successfully: ${sessionId}`);
+    console.log(`📊 Expected: ${expectedChunks || 'unknown'} chunks, ${expectedDuration || 'unknown'}s duration`);
+    
+    res.json({
+      success: true,
+      sessionId,
+      status: 'initialized',
+      message: 'Recording session initialized successfully',
+      session: {
+        sessionId,
+        status: sessionData.status,
+        createdAt: sessionData.createdAt,
+        expectedChunks: sessionData.expectedChunks,
+        expectedDuration: sessionData.expectedDuration,
+        videoSettings: sessionData.videoSettings
+      },
+      endpoints: {
+        uploadChunk: `/recording/chunk`,
+        finalize: `/recording/finalize`,
+        finalizeAsync: `/recording/finalize-async`,
+        checkStatus: `/session/${sessionId}/chunks/status`,
+        downloadVideo: `/session/${sessionId}/video`
+      }
+    });
+    
+  } catch (error) {
+    console.error(`❌ Session initialization error: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to initialize recording session',
+      details: error.message
+    });
+  }
+});
+
+/**
+ * Upload video chunk
+ * POST /recording/chunk
+ */
+router.post('/recording/chunk', upload.single('chunk'), async (req, res) => {
+  console.log('📦 Receiving video chunk...');
+  try {
+    const { sessionId, chunkIndex, totalChunks, timestamp } = req.body;
+    const chunkFile = req.file;
+    
+    if (!sessionId || chunkIndex === undefined) {
+      return res.status(400).json({
+        success: false,
+        error: 'sessionId and chunkIndex are required'
+      });
+    }
+    
+    if (!chunkFile) {
+      return res.status(400).json({
+        success: false,
+        error: 'No chunk file uploaded'
+      });
+    }
+    
+    console.log(`📥 Processing chunk ${chunkIndex} for session: ${sessionId}`);
+    console.log(`📊 Chunk info: ${(chunkFile.size / 1024).toFixed(2)}KB, mimetype: ${chunkFile.mimetype}`);
+    
+    // Get or create session
+    let sessionData = activeSessions.get(sessionId);
+    if (!sessionData) {
+      console.log(`⚠️  Session not found, attempting to recover: ${sessionId}`);
+      
+      // Try to load from disk
+      const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
+      const sessionDir = path.join(sessionsDir, sessionId);
+      const metadataPath = path.join(sessionDir, 'session.json');
+      
+      try {
+        const metadataContent = await fs.readFile(metadataPath, 'utf8');
+        sessionData = JSON.parse(metadataContent);
+        activeSessions.set(sessionId, sessionData);
+        console.log(`✅ Session recovered from disk: ${sessionId}`);
+      } catch (loadError) {
+        console.error(`❌ Could not recover session: ${loadError.message}`);
+        return res.status(404).json({
+          success: false,
+          error: 'Session not found',
+          sessionId,
+          suggestion: 'Please initialize session first with POST /recording/init'
+        });
+      }
+    }
+    
+    // Move chunk to session directory
+    const chunksDir = sessionData.directories.chunksDir;
+    const chunkFilename = `chunk-${String(chunkIndex).padStart(4, '0')}.webm`;
+    const chunkPath = path.join(chunksDir, chunkFilename);
+    
+    try {
+      await fs.rename(chunkFile.path, chunkPath);
+      console.log(`📁 Moved chunk to: ${chunkPath}`);
+    } catch (moveError) {
+      console.error(`❌ Failed to move chunk: ${moveError.message}`);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to save chunk file',
+        details: moveError.message
+      });
+    }
+    
+    // Update session data
+    const chunkData = {
+      chunkIndex: parseInt(chunkIndex),
+      filename: chunkFilename,
+      originalName: chunkFile.originalname,
+      size: chunkFile.size,
+      mimetype: chunkFile.mimetype,
+      uploadedAt: new Date().toISOString(),
+      timestamp: timestamp ? parseInt(timestamp) : Date.now()
+    };
+    
+    // Remove existing chunk with same index (if any)
+    sessionData.chunks = sessionData.chunks.filter(c => c.chunkIndex !== parseInt(chunkIndex));
+    sessionData.chunks.push(chunkData);
+    
+    // Update stats
+    sessionData.stats.chunksReceived = sessionData.chunks.length;
+    sessionData.stats.totalBytesReceived = sessionData.chunks.reduce((sum, c) => sum + c.size, 0);
+    sessionData.stats.lastChunkAt = new Date().toISOString();
+    sessionData.updatedAt = new Date().toISOString();
+    
+    if (totalChunks) {
+      sessionData.expectedChunks = parseInt(totalChunks);
+    }
+    
+    // Save updated metadata
+    try {
+      const metadataPath = path.join(sessionData.directories.sessionDir, 'session.json');
+      await fs.writeFile(metadataPath, JSON.stringify(sessionData, null, 2));
+    } catch (saveError) {
+      console.warn(`⚠️  Failed to update session metadata: ${saveError.message}`);
+    }
+    
+    // Update in-memory session
+    activeSessions.set(sessionId, sessionData);
+    
+    console.log(`✅ Chunk ${chunkIndex} uploaded successfully`);
+    console.log(`📊 Session progress: ${sessionData.chunks.length}/${sessionData.expectedChunks || '?'} chunks`);
+    
+    res.json({
+      success: true,
+      sessionId,
+      chunkIndex: parseInt(chunkIndex),
+      message: 'Chunk uploaded successfully',
+      session: {
+        chunksReceived: sessionData.stats.chunksReceived,
+        expectedChunks: sessionData.expectedChunks,
+        totalSizeMB: (sessionData.stats.totalBytesReceived / 1024 / 1024).toFixed(2),
+        isComplete: sessionData.expectedChunks ? 
+          sessionData.stats.chunksReceived >= sessionData.expectedChunks : false
+      }
+    });
+    
+  } catch (error) {
+    console.error(`❌ Chunk upload error: ${error.message}`);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to upload chunk',
+      details: error.message
+    });
+  }
+});
+
+/**
  * Finalize recording session and merge video chunks
  * POST /recording/finalize
  */
@@ -1228,6 +1489,8 @@ router.get('/status', async (req, res) => {
 });
 
 console.log('🎬 Enhanced Media Recording routes loaded:');
+console.log('  - POST /recording/init (initialize new session)');
+console.log('  - POST /recording/chunk (upload video chunk)');
 console.log('  - POST /recording/finalize (synchronous with chunk waiting)');
 console.log('  - POST /recording/finalize-async (asynchronous background processing)');
 console.log('  - GET  /recording/job/:jobId (check async job status)');
@@ -1236,6 +1499,8 @@ console.log('  - GET  /session/:sessionId/video (download final video)');
 console.log('  - GET  /status (health check)');
 console.log('');
 console.log('🔧 WebM Duration Fix Features:');
+console.log('  ✅ Session initialization and management');
+console.log('  ✅ Chunk upload with validation');
 console.log('  ✅ Chunk waiting system (prevents race conditions)');
 console.log('  ✅ WebM timestamp fixing (handles negative/discontinuous timestamps)');
 console.log('  ✅ Enhanced duration verification');
