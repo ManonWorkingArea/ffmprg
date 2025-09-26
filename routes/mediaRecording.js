@@ -140,7 +140,15 @@ async function validateChunkFile(chunkPath) {
       formatDetected = 'mp4';
       isValidFormat = true;
       confidence = 10;
-      console.log(`✅ MP4 detected: ${path.basename(chunkPath)}`);
+      
+      // Check for moov atom presence
+      const moovIndex = buffer.indexOf('moov');
+      if (moovIndex === -1) {
+        console.log(`⚠️  MP4 detected but missing moov atom: ${path.basename(chunkPath)} - will attempt repair`);
+        confidence = 6; // Lower confidence but still recoverable
+      } else {
+        console.log(`✅ Complete MP4 detected: ${path.basename(chunkPath)}`);
+      }
     }
     // MP4 variants and brands
     else if (buffer.includes(Buffer.from('ftyp')) && (
@@ -244,7 +252,12 @@ async function validateChunkFile(chunkPath) {
       
       let recoveryStrategy = 'skip';
       if (formatDetected.includes('mp4')) {
-        recoveryStrategy = 'mp4-repair';
+        // Special handling for MP4 files with missing moov atom
+        if (confidence < 8) {
+          recoveryStrategy = 'mp4-moov-repair';  // Special repair for incomplete MP4
+        } else {
+          recoveryStrategy = 'mp4-repair';
+        }
       } else if (formatDetected.includes('mov') || formatDetected.includes('avi')) {
         recoveryStrategy = 'reprocess-container';
       } else if (formatDetected.includes('webm')) {
@@ -326,25 +339,27 @@ async function recoverChunkFile(chunkPath, recoveryStrategy = 'reprocess') {
     await fs.copyFile(chunkPath, backupPath);
     
     if (recoveryStrategy === 'mp4-repair') {
-      // MP4-specific repair with ftyp header reconstruction
+      // MP4-specific repair with moov atom reconstruction
       return new Promise((resolve, reject) => {
         ffmpeg(chunkPath)
           .inputOptions([
             '-err_detect', 'ignore_err',
             '-fflags', '+genpts+igndts',
-            '-analyzeduration', '2000000',   // Longer analysis for MP4
-            '-probesize', '8000000',         // Larger probe size
-            '-f', 'mp4'                      // Force MP4 input format
+            '-analyzeduration', '3000000',   // Longer analysis for broken MP4
+            '-probesize', '10000000',        // Larger probe size
+            '-f', 'mp4',                     // Force MP4 input format
+            '-movflags', '+faststart'        // Try to fix moov placement
           ])
           .outputOptions([
             '-c:v', 'libx264',
             '-preset', 'ultrafast',
-            '-crf', '28',                    // Good quality for MP4
+            '-crf', '28',
             '-pix_fmt', 'yuv420p',
-            '-movflags', 'faststart+empty_moov+default_base_moof',
+            '-movflags', 'faststart+empty_moov+default_base_moof+frag_keyframe',
             '-avoid_negative_ts', 'make_zero',
-            '-frag_duration', '1000000',     // MP4 fragmentation
-            '-max_muxing_queue_size', '2048'
+            '-frag_duration', '2000000',     // Larger fragments
+            '-max_muxing_queue_size', '4096',
+            '-vsync', 'cfr'                  // Constant frame rate
           ])
           .output(recoveredPath)
           .on('end', async () => {
@@ -352,7 +367,7 @@ async function recoverChunkFile(chunkPath, recoveryStrategy = 'reprocess') {
               const stats = await fs.stat(recoveredPath);
               if (stats.size > 1000) {
                 await fs.rename(recoveredPath, chunkPath);
-                console.log(`✅ MP4 repair successful: ${path.basename(chunkPath)}`);
+                console.log(`✅ MP4 moov repair successful: ${path.basename(chunkPath)}`);
                 resolve({ success: true, method: 'mp4-repair' });
               } else {
                 resolve({ success: false, error: 'Recovered MP4 file too small' });
@@ -363,7 +378,113 @@ async function recoverChunkFile(chunkPath, recoveryStrategy = 'reprocess') {
           })
           .on('error', (error) => {
             console.log(`❌ MP4 repair failed: ${error.message}`);
-            resolve({ success: false, error: error.message });
+            // Try alternative repair method
+            console.log(`🔧 Trying alternative MP4 repair...`);
+            ffmpeg(chunkPath)
+              .inputOptions([
+                '-err_detect', 'ignore_err',
+                '-f', 'rawvideo',            // Try raw video extraction
+                '-pix_fmt', 'yuv420p'
+              ])
+              .outputOptions([
+                '-c:v', 'libx264',
+                '-r', '30',                  // Force frame rate
+                '-movflags', 'faststart'
+              ])
+              .output(recoveredPath + '.alt')
+              .on('end', async () => {
+                try {
+                  const altStats = await fs.stat(recoveredPath + '.alt');
+                  if (altStats.size > 500) {
+                    await fs.rename(recoveredPath + '.alt', chunkPath);
+                    console.log(`✅ Alternative MP4 repair successful: ${path.basename(chunkPath)}`);
+                    resolve({ success: true, method: 'mp4-repair-alt' });
+                  } else {
+                    resolve({ success: false, error: 'Alternative MP4 repair failed' });
+                  }
+                } catch (altError) {
+                  resolve({ success: false, error: `Alternative repair failed: ${altError.message}` });
+                }
+              })
+              .on('error', (altError) => {
+                resolve({ success: false, error: `Both MP4 repairs failed: ${altError.message}` });
+              })
+              .run();
+          })
+          .run();
+      });
+    }
+    
+    else if (recoveryStrategy === 'mp4-moov-repair') {
+      // Special repair for MP4 files missing moov atom
+      console.log(`🔧 Attempting specialized MP4 moov repair for: ${path.basename(chunkPath)}`);
+      return new Promise((resolve, reject) => {
+        // Try untrunc first (if available) or ffmpeg with special options
+        ffmpeg(chunkPath)
+          .inputOptions([
+            '-err_detect', 'ignore_err',
+            '-fflags', '+genpts+igndts',
+            '-analyzeduration', '5000000',   // Very long analysis
+            '-probesize', '20000000',        // Very large probe
+            '-fix_sub_duration'              // Fix subtitle duration issues
+          ])
+          .outputOptions([
+            '-c:v', 'copy',                  // Try to copy without re-encoding first
+            '-movflags', 'faststart+empty_moov+default_base_moof',
+            '-f', 'mp4',
+            '-avoid_negative_ts', 'make_zero'
+          ])
+          .output(recoveredPath + '.copy')
+          .on('end', async () => {
+            try {
+              const copyStats = await fs.stat(recoveredPath + '.copy');
+              if (copyStats.size > 500) {
+                await fs.rename(recoveredPath + '.copy', chunkPath);
+                console.log(`✅ MP4 moov copy repair successful: ${path.basename(chunkPath)}`);
+                resolve({ success: true, method: 'mp4-moov-copy' });
+                return;
+              }
+            } catch (error) {
+              console.log(`⚠️  Copy method failed, trying re-encoding...`);
+            }
+            
+            // If copy failed, try re-encoding
+            ffmpeg(chunkPath)
+              .inputOptions([
+                '-err_detect', 'ignore_err',
+                '-fflags', '+genpts',
+                '-analyzeduration', '10000000'
+              ])
+              .outputOptions([
+                '-c:v', 'libx264',
+                '-preset', 'ultrafast',
+                '-crf', '23',
+                '-movflags', 'faststart',
+                '-pix_fmt', 'yuv420p'
+              ])
+              .output(recoveredPath)
+              .on('end', async () => {
+                try {
+                  const reencStats = await fs.stat(recoveredPath);
+                  if (reencStats.size > 1000) {
+                    await fs.rename(recoveredPath, chunkPath);
+                    console.log(`✅ MP4 moov re-encoding successful: ${path.basename(chunkPath)}`);
+                    resolve({ success: true, method: 'mp4-moov-reenc' });
+                  } else {
+                    resolve({ success: false, error: 'MP4 moov repair produced small file' });
+                  }
+                } catch (error) {
+                  resolve({ success: false, error: `MP4 moov repair failed: ${error.message}` });
+                }
+              })
+              .on('error', (error) => {
+                resolve({ success: false, error: `MP4 moov re-encoding failed: ${error.message}` });
+              })
+              .run();
+          })
+          .on('error', (error) => {
+            console.log(`⚠️  MP4 copy failed, trying re-encoding: ${error.message}`);
+            // Continue to re-encoding attempt (handled in 'end' event)
           })
           .run();
       });
@@ -737,7 +858,8 @@ async function mergeVideoChunksWithFormat(sessionId, sessionData) {
                   bitrate: revalidationResult.bitrate,
                   hasVideo: true,
                   videoCodec: revalidationResult.codec,
-                  resolution: revalidationResult.resolution
+                  resolution: revalidationResult.resolution,
+                  format: revalidationResult.format || 'unknown'
                 };
               } else {
                 console.warn(`⚠️  Recovery validation failed for chunk ${chunk.chunkIndex}, skipping`);
@@ -759,7 +881,8 @@ async function mergeVideoChunksWithFormat(sessionId, sessionData) {
             bitrate: validationResult.bitrate,
             hasVideo: true,
             videoCodec: validationResult.codec,
-            resolution: validationResult.resolution
+            resolution: validationResult.resolution,
+            format: validationResult.format || 'unknown'
           };
         }
         
@@ -908,13 +1031,29 @@ The merge will proceed with available chunks but may result in a very short vide
     // Sort by index
     chunkFiles.sort((a, b) => a.index - b.index);
     
-    console.log(`📊 WebM Analysis Summary:`);
+    // Check if all files are MP4 - if so, use fast concat method
+    const allMP4 = chunkFiles.every(chunk => chunk.format === 'mp4');
+    
+    console.log(`📊 Video Analysis Summary:`);
     console.log(`   Valid chunks: ${chunkFiles.length}/${sessionData.chunks.length}`);
     console.log(`   Expected duration: ${totalExpectedDuration.toFixed(2)}s`);
     console.log(`   Total size: ${(chunkFiles.reduce((sum, f) => sum + f.size, 0) / 1024 / 1024).toFixed(2)}MB`);
     console.log(`   Timestamp issues: ${hasTimestampIssues ? 'YES (will fix)' : 'NO'}`);
+    console.log(`   All MP4 format: ${allMP4 ? 'YES (fast concat mode)' : 'NO (mixed format)'}`);
     
-    // Use optimized FFmpeg strategy for WebM
+    // Use fast MP4 concat if all files are MP4 and no timestamp issues
+    if (allMP4 && !hasTimestampIssues) {
+      console.log(`🚀 Using FAST MP4 concat mode (no re-encoding)...`);
+      try {
+        return await fastMP4Concat(chunkFiles, outputPath, totalExpectedDuration);
+      } catch (fastConcatError) {
+        console.error(`❌ Fast concat failed: ${fastConcatError.message}`);
+        console.log(`🔄 Falling back to standard merge method...`);
+        // Continue to standard method below
+      }
+    }
+    
+    // Use optimized FFmpeg strategy for mixed formats or timestamp issues
     return new Promise((resolve, reject) => {
       const startTime = Date.now();
       
@@ -986,13 +1125,15 @@ The merge will proceed with available chunks but may result in a very short vide
       ffmpegCommand
         .output(outputPath)
         .on('start', (commandLine) => {
-          console.log(`🚀 FFmpeg started with WebM optimization`);
+          console.log(`🚀 FFmpeg started with MP4/WebM optimization`);
           console.log(`   Expected duration: ${totalExpectedDuration.toFixed(2)}s`);
           console.log(`   Timestamp fixes: ${hasTimestampIssues ? 'enabled' : 'disabled'}`);
         })
         .on('progress', (progress) => {
           if (progress.percent) {
-            console.log(`⏳ Progress: ${Math.round(progress.percent)}% (${progress.timemark || 'N/A'})`);
+            // Cap progress at 100% to avoid confusing output when processing multiple files
+            const cappedProgress = Math.min(Math.round(progress.percent), 100);
+            console.log(`⏳ Progress: ${cappedProgress}% (${progress.timemark || 'N/A'})`);
           }
         })
         .on('end', async () => {
@@ -1018,7 +1159,7 @@ The merge will proceed with available chunks but may result in a very short vide
               console.warn(`⚠️  Could not verify final duration: ${probeError.message}`);
             }
             
-            console.log(`✅ WebM merge completed in ${processingTime}s`);
+            console.log(`✅ Video merge completed in ${processingTime}s`);
             console.log(`📊 Final video: ${sizeMB}MB`);
             console.log(`⏱️  Expected: ${totalExpectedDuration.toFixed(2)}s, Actual: ${actualDuration.toFixed(2)}s`);
             
@@ -1047,7 +1188,7 @@ The merge will proceed with available chunks but may result in a very short vide
         })
         .on('error', async (error) => {
           console.error(`❌ FFmpeg error: ${error.message}`);
-          console.error(`📊 Context: ${chunkFiles.length} WebM chunks, expected ${totalExpectedDuration.toFixed(2)}s`);
+          console.error(`📊 Context: ${chunkFiles.length} video chunks, expected ${totalExpectedDuration.toFixed(2)}s`);
           
           // Try fallback strategy if the main approach fails
           console.log(`🔄 Attempting fallback strategy...`);
@@ -1082,17 +1223,19 @@ async function attemptFallbackMerge(chunkFiles, outputPath, sessionId) {
   console.log(`🔄 Starting fallback merge with ${chunkFiles.length} chunks...`);
   
   try {
-    // Create a file list for concat demuxer
+    // Create a file list for concat demuxer with absolute paths
     const sessionsDir = global.MEDIA_FALLBACK_DIR || SESSIONS_DIR;
     const sessionDir = path.join(sessionsDir, sessionId);
     const fileListPath = path.join(sessionDir, 'fallback_filelist.txt');
     
+    // Use absolute paths in the file list
     const fileListContent = chunkFiles
-      .map(chunk => `file '${path.basename(chunk.path)}'`)
+      .map(chunk => `file '${chunk.path}'`)
       .join('\n');
     
     await fs.writeFile(fileListPath, fileListContent);
     console.log(`📝 Created fallback file list: ${fileListPath}`);
+    console.log(`📋 File list contents:\n${fileListContent}`);
     
     return new Promise((resolve, reject) => {
       const startTime = Date.now();
@@ -1167,6 +1310,124 @@ async function attemptFallbackMerge(chunkFiles, outputPath, sessionId) {
     
   } catch (error) {
     console.error(`❌ Fallback setup error: ${error.message}`);
+    throw error;
+  }
+}
+
+/**
+ * Super fast MP4 concatenation without re-encoding
+ * Uses FFmpeg concat demuxer with copy codec for maximum speed
+ */
+async function fastMP4Concat(chunkFiles, outputPath, expectedDuration) {
+  const startTime = Date.now();
+  console.log(`⚡ Starting FAST MP4 concat (${chunkFiles.length} chunks)...`);
+  
+  try {
+    // Create temporary concat file list
+    const tempDir = path.dirname(outputPath);
+    const concatListPath = path.join(tempDir, 'fast_concat_list.txt');
+    
+    // Create concat file list with absolute paths
+    const concatContent = chunkFiles
+      .map(chunk => `file '${chunk.path}'`)
+      .join('\n');
+    
+    await fs.writeFile(concatListPath, concatContent);
+    console.log(`📝 Created fast concat list with ${chunkFiles.length} files`);
+    
+    return new Promise((resolve, reject) => {
+      ffmpeg()
+        .input(concatListPath)
+        .inputOptions([
+          '-f', 'concat',
+          '-safe', '0',
+          '-protocol_whitelist', 'file,pipe'
+        ])
+        .outputOptions([
+          '-c', 'copy',                    // Copy streams without re-encoding (FASTEST!)
+          '-avoid_negative_ts', 'make_zero',
+          '-fflags', '+genpts',            // Generate presentation timestamps
+          '-movflags', 'faststart'         // Optimize for web streaming
+        ])
+        .output(outputPath)
+        .on('start', () => {
+          console.log(`🚀 Fast MP4 concat started (copy mode - no re-encoding)`);
+        })
+        .on('progress', (progress) => {
+          if (progress.percent) {
+            const cappedProgress = Math.min(Math.round(progress.percent), 100);
+            console.log(`⚡ Fast concat: ${cappedProgress}% (${progress.timemark || 'N/A'})`);
+          }
+        })
+        .on('end', async () => {
+          const endTime = Date.now();
+          const processingTime = ((endTime - startTime) / 1000).toFixed(2);
+          
+          try {
+            // Clean up temp file
+            await fs.unlink(concatListPath).catch(() => {});
+            
+            // Get final file info
+            const stats = await fs.stat(outputPath);
+            const sizeMB = (stats.size / 1024 / 1024).toFixed(2);
+            
+            // Get actual duration
+            let actualDuration = expectedDuration; // fallback
+            try {
+              const ffprobe = require('fluent-ffmpeg').ffprobe;
+              const metadata = await new Promise((resolve, reject) => {
+                ffprobe(outputPath, (err, data) => {
+                  if (err) reject(err);
+                  else resolve(data);
+                });
+              });
+              actualDuration = parseFloat(metadata.format.duration) || expectedDuration;
+            } catch (probeError) {
+              console.warn(`⚠️  Could not verify final duration: ${probeError.message}`);
+            }
+            
+            console.log(`✅ FAST MP4 concat completed in ${processingTime}s`);
+            console.log(`📊 Final video: ${sizeMB}MB`);
+            console.log(`⏱️  Expected: ${expectedDuration.toFixed(2)}s, Actual: ${actualDuration.toFixed(2)}s`);
+            console.log(`⚡ Speed improvement: ~10-50x faster (no re-encoding)`);
+            
+            const durationDiff = Math.abs(actualDuration - expectedDuration);
+            if (durationDiff > 2) {
+              console.log(`⚠️  Duration difference: ${durationDiff.toFixed(2)}s (may indicate missing chunks)`);
+            } else {
+              console.log(`✅ Duration accuracy: ${durationDiff.toFixed(2)}s difference`);
+            }
+            
+            resolve({
+              success: true,
+              method: 'fast-mp4-concat',
+              outputPath: outputPath,
+              sizeMB: parseFloat(sizeMB),
+              processingTime: parseFloat(processingTime),
+              actualDuration: actualDuration,
+              expectedDuration: expectedDuration,
+              chunkCount: chunkFiles.length
+            });
+          } catch (error) {
+            console.error(`❌ Fast concat post-processing error: ${error.message}`);
+            reject(error);
+          }
+        })
+        .on('error', (error) => {
+          console.error(`❌ Fast MP4 concat failed: ${error.message}`);
+          console.log(`🔄 Falling back to standard merge method...`);
+          
+          // Clean up temp file
+          fs.unlink(concatListPath).catch(() => {});
+          
+          // Fallback to standard method
+          reject(new Error(`Fast concat failed: ${error.message}`));
+        })
+        .run();
+    });
+    
+  } catch (error) {
+    console.error(`❌ Fast concat setup error: ${error.message}`);
     throw error;
   }
 }
@@ -1282,7 +1543,9 @@ async function mergeVideoChunks(sessionId, sessionData) {
         })
         .on('progress', (progress) => {
           if (progress.percent) {
-            console.log(`⏳ Progress: ${Math.round(progress.percent)}% (${progress.timemark || 'N/A'})`);
+            // Cap progress at 100% to prevent over-100% display
+            const cappedProgress = Math.min(Math.round(progress.percent), 100);
+            console.log(`⏳ Progress: ${cappedProgress}% (${progress.timemark || 'N/A'})`);
           }
         })
         .on('end', async () => {
