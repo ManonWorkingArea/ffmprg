@@ -8,6 +8,7 @@ const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
 const { S3 } = require('@aws-sdk/client-s3');
 const mongoose = require('mongoose');
+const sharp = require('sharp');
 const { getHostnameData, getSpaceData } = require('../middleware/hostname');
 
 // Configure multer for chunk uploads with increased limits for 4K@60fps video
@@ -20,6 +21,117 @@ const upload = multer({
     files: 1    // Maximum number of files
   }
 });
+
+/**
+ * Generate thumbnail from video file
+ * @param {string} videoPath - Path to the video file
+ * @param {string} outputDir - Directory to save thumbnail
+ * @returns {Object} - Object containing thumbnail data and path
+ */
+async function generateThumbnail(videoPath, outputDir) {
+  return new Promise((resolve, reject) => {
+    const thumbnailPath = path.join(outputDir, 'thumbnail.png');
+    
+    console.log(`🖼️  Generating thumbnail from: ${videoPath}`);
+    
+    ffmpeg(videoPath)
+      .seekInput(1) // Extract frame at 1 second
+      .frames(1)
+      .output(thumbnailPath)
+      .outputOptions([
+        '-vf', 'scale=320:240:force_original_aspect_ratio=decrease,pad=320:240:(ow-iw)/2:(oh-ih)/2',
+        '-q:v', '2' // High quality
+      ])
+      .on('end', async () => {
+        try {
+          console.log(`✅ Thumbnail generated: ${thumbnailPath}`);
+          
+          // Read file and convert to base64
+          const thumbnailBuffer = await fs.readFile(thumbnailPath);
+          const base64Thumbnail = `data:image/png;base64,${thumbnailBuffer.toString('base64')}`;
+          
+          // Get file stats
+          const stats = await fs.stat(thumbnailPath);
+          
+          resolve({
+            thumbnailPath,
+            base64: base64Thumbnail,
+            size: stats.size,
+            buffer: thumbnailBuffer
+          });
+        } catch (error) {
+          reject(new Error(`Failed to process thumbnail: ${error.message}`));
+        }
+      })
+      .on('error', (error) => {
+        console.error(`❌ Thumbnail generation failed: ${error.message}`);
+        reject(new Error(`Thumbnail generation failed: ${error.message}`));
+      })
+      .run();
+  });
+}
+
+/**
+ * Get video metadata (duration, size)
+ * @param {string} videoPath - Path to the video file
+ * @returns {Object} - Object containing video metadata
+ */
+async function getVideoMetadata(videoPath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(videoPath, async (err, metadata) => {
+      if (err) {
+        reject(new Error(`Failed to get video metadata: ${err.message}`));
+        return;
+      }
+      
+      try {
+        const duration = metadata.format.duration || 0;
+        const stats = await fs.stat(videoPath);
+        const size = stats.size;
+        
+        resolve({
+          duration: parseFloat(duration),
+          size: size,
+          format: metadata.format,
+          streams: metadata.streams
+        });
+      } catch (error) {
+        reject(new Error(`Failed to get file stats: ${error.message}`));
+      }
+    });
+  });
+}
+
+/**
+ * Upload thumbnail to S3
+ * @param {Object} spaceData - Space configuration with S3 credentials
+ * @param {Buffer} thumbnailBuffer - Thumbnail image buffer
+ * @param {string} filename - Filename for the thumbnail
+ * @returns {string} - URL of uploaded thumbnail
+ */
+async function uploadThumbnailToS3(spaceData, thumbnailBuffer, filename) {
+  const s3Client = new S3({
+    endpoint: `${spaceData.s3EndpointDefault}`,
+    region: `${spaceData.s3Region}`,
+    ResponseContentEncoding: "utf-8",
+    credentials: {
+      accessKeyId: spaceData.s3Key,
+      secretAccessKey: spaceData.s3Secret
+    },
+    forcePathStyle: false
+  });
+
+  const uploadParams = {
+    Bucket: `${spaceData.s3Bucket}`,
+    Key: `thumbnails/${filename}`,
+    Body: thumbnailBuffer,
+    ContentType: 'image/png',
+    ACL: 'public-read'
+  };
+
+  await s3Client.putObject(uploadParams);
+  return `${spaceData.s3Endpoint}thumbnails/${filename}`;
+}
 
 // Base directories for media recording storage - use absolute path to ensure consistency
 const MEDIA_BASE_DIR = path.resolve(process.cwd(), 'uploads', 'media-recording');
@@ -2046,6 +2158,18 @@ async function cleanupChunkFiles(sessionId, sessionData) {
       }
     }
     
+    // Try to delete thumbnail file
+    try {
+      const thumbnailPath = path.join(sessionDir, 'thumbnail.png');
+      const thumbnailStats = await fs.stat(thumbnailPath);
+      await fs.unlink(thumbnailPath);
+      totalSizeFreed += thumbnailStats.size;
+      deletedFiles++;
+      console.log(`🗑️  Deleted thumbnail: thumbnail.png (${(thumbnailStats.size / 1024).toFixed(2)}KB)`);
+    } catch (error) {
+      // Thumbnail might not exist - ignore
+    }
+    
     // Try to remove chunks directory if empty
     try {
       await fs.rmdir(chunksDir);
@@ -2518,7 +2642,18 @@ router.post('/recording/finalize', async (req, res) => {
       console.log(`📊 Final video: ${mergeResult.sizeMB}MB, ${mergeResult.actualDuration.toFixed(2)}s`);
       console.log(`⏱️  Expected vs Actual duration: ${mergeResult.expectedDuration.toFixed(2)}s vs ${mergeResult.actualDuration.toFixed(2)}s`);
       
+      // Get video metadata
+      console.log(`📊 Getting video metadata...`);
+      const videoMetadata = await getVideoMetadata(mergeResult.outputPath);
+      console.log(`✅ Video metadata: ${videoMetadata.size} bytes, ${videoMetadata.duration.toFixed(2)}s`);
+      
+      // Generate thumbnail
+      console.log(`🖼️  Generating thumbnail...`);
+      const thumbnailData = await generateThumbnail(mergeResult.outputPath, sessionData.directories.sessionDir);
+      console.log(`✅ Thumbnail generated: ${thumbnailData.size} bytes`);
+      
       let finalVideoUrl = null;
+      let thumbnailUrl = null;
       
       // อัปโหลดไป S3 (ถ้ามี space data)
       if (sessionData.space && sessionData.space.s3Bucket) {
@@ -2554,26 +2689,44 @@ router.post('/recording/finalize', async (req, res) => {
           
           console.log(`✅ S3 upload successful: ${finalVideoUrl}`);
           
+          // Upload thumbnail to S3
+          console.log(`🖼️  Uploading thumbnail to S3...`);
+          const thumbnailFileName = `${sessionId}_thumbnail.png`;
+          thumbnailUrl = await uploadThumbnailToS3(sessionData.space, thumbnailData.buffer, thumbnailFileName);
+          console.log(`✅ Thumbnail upload successful: ${thumbnailUrl}`);
+          
           // อัปเดต storage collection
           const storageId = sessionData.storage || sessionData.fileId;
           if (storageId) {
-            console.log(`🔄 Updating storage ${storageId} with URL: ${finalVideoUrl}`);
+            console.log(`🔄 Updating storage ${storageId} with complete metadata...`);
             
             // อัปเดต transcode field
             await safeUpdateTranscode(storageId, 'media_recording', finalVideoUrl);
             console.log(`✅ Transcode field updated`);
             
-            // อัปเดตฟิลด์ path ด้วย final URL
+            // อัปเดตฟิลด์ครบถ้วน
+            const updateData = {
+              path: finalVideoUrl,
+              size: videoMetadata.size,
+              duration: videoMetadata.duration,
+              thumbnail: thumbnailData.base64,
+              thumbnailUrl: thumbnailUrl
+            };
+            
             const pathUpdateResult = await Storage.findOneAndUpdate(
               { _id: new mongoose.Types.ObjectId(storageId) },
-              { $set: { path: finalVideoUrl } },
+              { $set: updateData },
               { new: true }
             );
             
             if (pathUpdateResult) {
-              console.log(`✅ Storage path updated successfully: ${finalVideoUrl}`);
+              console.log(`✅ Storage updated with complete metadata:`);
+              console.log(`   📁 Path: ${finalVideoUrl}`);
+              console.log(`   📏 Size: ${videoMetadata.size} bytes`);
+              console.log(`   ⏱️  Duration: ${videoMetadata.duration.toFixed(2)}s`);
+              console.log(`   🖼️  Thumbnail: ${thumbnailUrl}`);
             } else {
-              console.error(`❌ Failed to update storage path for ID: ${storageId}`);
+              console.error(`❌ Failed to update storage for ID: ${storageId}`);
             }
           } else {
             console.log(`⚠️  No storage ID or fileId found in session data`);
