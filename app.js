@@ -205,7 +205,8 @@ const storageSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }, // วันที่สร้าง
   updatedAt: { type: Date, default: Date.now }, // วันที่อัปเดต
   duration: { type: Number, default: 0 }, // ระยะเวลา (สำหรับไฟล์มีเดีย)
-  thumbnail: { type: String, default: '' }, // URL ของ thumbnail
+  thumbnail: { type: String, default: '' }, // Base64 thumbnail data
+  thumbnailUrl: { type: String, default: '' }, // URL ของ thumbnail ใน S3
   transcode: { type: Object, default: {} } // เพิ่มฟิลด์ transcode
 });
 

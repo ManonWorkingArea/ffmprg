@@ -2740,7 +2740,8 @@ router.post('/recording/finalize', async (req, res) => {
               duration: videoMetadata.duration,
               thumbnail: thumbnailData.base64,
               thumbnailUrl: thumbnailUrl,
-              'transcode.media_recording': finalVideoUrl
+              'transcode.media_recording': finalVideoUrl,
+              updatedAt: new Date()
             };
             
             console.log(`🔍 Complete update data being sent:`, {
