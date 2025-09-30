@@ -2753,6 +2753,7 @@ router.post('/recording/finalize', async (req, res) => {
               duration: videoMetadata.duration,
               thumbnail: thumbnailData.base64,
               thumbnailUrl: thumbnailUrl,
+              type: 'media', // แก้ไข type ให้เป็น media
               mimetype: 'video/mp4', // แก้ไข mimetype ให้ถูกต้อง
               'transcode.media_recording': finalVideoUrl,
               updatedAt: new Date()
@@ -2765,6 +2766,7 @@ router.post('/recording/finalize', async (req, res) => {
               duration: videoMetadata.duration,
               thumbnailLength: thumbnailData.base64 ? thumbnailData.base64.length : 0,
               thumbnailUrl: thumbnailUrl,
+              type: 'media',
               mimetype: 'video/mp4',
               transcodeField: finalVideoUrl
             });
