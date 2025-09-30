@@ -2498,12 +2498,13 @@ router.post('/recording/finalize', async (req, res) => {
     console.log(`🔀 Starting video merge for ${sessionData.chunks.length} chunks...`);
     
     // อัปเดตสถานะใน storage (ถ้ามี)
-    if (sessionData.storage) {
+    const storageId = sessionData.storage || sessionData.fileId;
+    if (storageId) {
       try {
-        await safeUpdateTranscode(sessionData.storage, 'media_recording', 'processing...');
-        console.log(`Updated storage ${sessionData.storage} with processing status`);
+        await safeUpdateTranscode(storageId, 'media_recording', 'processing...');
+        console.log(`Updated storage ${storageId} with processing status`);
       } catch (storageError) {
-        console.warn(`Failed to update storage ${sessionData.storage}:`, storageError.message);
+        console.warn(`Failed to update storage ${storageId}:`, storageError.message);
       }
     }
     
@@ -2553,16 +2554,17 @@ router.post('/recording/finalize', async (req, res) => {
           console.log(`✅ S3 upload successful: ${finalVideoUrl}`);
           
           // อัปเดต storage collection
-          if (sessionData.storage) {
-            console.log(`🔄 Updating storage ${sessionData.storage} with URL: ${finalVideoUrl}`);
+          const storageId = sessionData.storage || sessionData.fileId;
+          if (storageId) {
+            console.log(`🔄 Updating storage ${storageId} with URL: ${finalVideoUrl}`);
             
             // อัปเดต transcode field
-            await safeUpdateTranscode(sessionData.storage, 'media_recording', finalVideoUrl);
+            await safeUpdateTranscode(storageId, 'media_recording', finalVideoUrl);
             console.log(`✅ Transcode field updated`);
             
             // อัปเดตฟิลด์ path ด้วย final URL
             const pathUpdateResult = await Storage.findOneAndUpdate(
-              { _id: new mongoose.Types.ObjectId(sessionData.storage) },
+              { _id: new mongoose.Types.ObjectId(storageId) },
               { $set: { path: finalVideoUrl } },
               { new: true }
             );
@@ -2570,18 +2572,19 @@ router.post('/recording/finalize', async (req, res) => {
             if (pathUpdateResult) {
               console.log(`✅ Storage path updated successfully: ${finalVideoUrl}`);
             } else {
-              console.error(`❌ Failed to update storage path for ID: ${sessionData.storage}`);
+              console.error(`❌ Failed to update storage path for ID: ${storageId}`);
             }
           } else {
-            console.log(`⚠️  No storage ID found in session data`);
+            console.log(`⚠️  No storage ID or fileId found in session data`);
           }
           
         } catch (s3Error) {
           console.error(`❌ S3 upload failed: ${s3Error.message}`);
           
           // อัปเดต storage ด้วย error status
-          if (sessionData.storage) {
-            await safeUpdateTranscode(sessionData.storage, 'media_recording', 'upload_error');
+          const storageId = sessionData.storage || sessionData.fileId;
+          if (storageId) {
+            await safeUpdateTranscode(storageId, 'media_recording', 'upload_error');
           }
         }
       } else {
@@ -2625,9 +2628,10 @@ router.post('/recording/finalize', async (req, res) => {
       console.error(`❌ Video merge failed: ${mergeError.message}`);
       
       // อัปเดต storage ด้วย error status
-      if (sessionData.storage) {
+      const storageId = sessionData.storage || sessionData.fileId;
+      if (storageId) {
         try {
-          await safeUpdateTranscode(sessionData.storage, 'media_recording', 'merge_error');
+          await safeUpdateTranscode(storageId, 'media_recording', 'merge_error');
         } catch (storageError) {
           console.error(`Failed to update storage with error status:`, storageError.message);
         }
