@@ -194,7 +194,7 @@ const Task = mongoose.model('Queue', taskSchema);
 // สร้าง Schema สำหรับ Storage
 const storageSchema = new mongoose.Schema({
   owner: { type: String, required: true }, // เจ้าของ
-  original: { type: String, required: true }, // ชื่อไฟล์ต้นฉบับ
+  original: { type: String, default: '' }, // ชื่อไฟล์ต้นฉบับ (path ใน S3 โดยไม่มี endpoint)
   path: { type: String, required: true }, // URL ของไฟล์
   parent: { type: String, default: '' }, // ID ของ parent
   name: { type: String, required: true }, // ชื่อไฟล์

@@ -2733,23 +2733,39 @@ router.post('/recording/finalize', async (req, res) => {
             console.log(`🔄 Updating storage ${storageId} with complete metadata...`);
             console.log(`🖼️  Final thumbnailUrl for storage:`, thumbnailUrl);
             
+            // สร้าง original field จาก finalVideoUrl โดยตัด endpoint ออก
+            let originalPath = '';
+            if (finalVideoUrl) {
+              try {
+                const url = new URL(finalVideoUrl);
+                originalPath = url.pathname.startsWith('/') ? url.pathname.substring(1) : url.pathname;
+              } catch (error) {
+                console.warn(`Failed to parse URL for original field: ${error.message}`);
+                originalPath = finalVideoUrl;
+              }
+            }
+            
             // อัปเดตทุกฟิลด์รวมถึง transcode ในครั้งเดียว
             const updateData = {
+              original: originalPath,
               path: finalVideoUrl,
               size: videoMetadata.size,
               duration: videoMetadata.duration,
               thumbnail: thumbnailData.base64,
               thumbnailUrl: thumbnailUrl,
+              mimetype: 'video/mp4', // แก้ไข mimetype ให้ถูกต้อง
               'transcode.media_recording': finalVideoUrl,
               updatedAt: new Date()
             };
             
             console.log(`🔍 Complete update data being sent:`, {
+              original: originalPath,
               path: finalVideoUrl,
               size: videoMetadata.size,
               duration: videoMetadata.duration,
               thumbnailLength: thumbnailData.base64 ? thumbnailData.base64.length : 0,
               thumbnailUrl: thumbnailUrl,
+              mimetype: 'video/mp4',
               transcodeField: finalVideoUrl
             });
             
