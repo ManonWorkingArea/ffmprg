@@ -2485,6 +2485,7 @@ router.post('/recording/finalize', async (req, res) => {
       }
     }
     
+    
     try {
       // Use enhanced merge function that handles MP4/WebM format issues
       const mergeResult = await mergeVideoChunksWithFormat(sessionId, sessionData);
