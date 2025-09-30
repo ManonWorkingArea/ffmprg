@@ -80,25 +80,37 @@ const initializeDirectories = async () => {
 const activeSessions = new Map();
 let directoryInitialized = false;
 
-// Storage schema สำหรับอัปเดตสถานะ transcode
-const storageSchema = new mongoose.Schema({
-  owner: { type: String, required: true },
-  original: { type: String, required: true },
-  path: { type: String, required: true },
-  parent: { type: String, default: '' },
-  name: { type: String, required: true },
-  size: { type: Number, required: true },
-  type: { type: String, required: true },
-  mimetype: { type: String, required: true },
-  spaceId: { type: String, required: true },
-  createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now },
-  duration: { type: Number, default: 0 },
-  thumbnail: { type: String, default: '' },
-  transcode: { type: Object, default: {} }
-});
+// ใช้ Storage model ที่มีอยู่แล้วใน app.js หรือสร้างใหม่ถ้ายังไม่มี
+let Storage;
 
-const Storage = mongoose.model('storage', storageSchema, 'storage');
+// ตรวจสอบว่า Storage model มีอยู่แล้วหรือไม่
+if (mongoose.models.storage) {
+  Storage = mongoose.models.storage;
+  console.log('📦 Using existing Storage model from app.js');
+} else {
+  // สร้าง model ใหม่ถ้ายังไม่มี
+  const storageSchema = new mongoose.Schema({
+    owner: { type: String, required: true },
+    original: { type: String, required: true },
+    path: { type: String, required: true },
+    parent: { type: String, default: '' },
+    name: { type: String, required: true },
+    size: { type: Number, required: true },
+    type: { type: String, required: true },
+    mimetype: { type: String, required: true },
+    spaceId: { type: String, required: true },
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now },
+    duration: { type: Number, default: 0 },
+    thumbnail: { type: String, default: '' },
+    transcode: { type: Object, default: {} }
+  });
+  
+  Storage = mongoose.model('storage', storageSchema, 'storage');
+  console.log('📦 Created new Storage model in mediaRecording.js');
+}
+
+console.log('📦 Storage model initialized for media recording');
 
 // Helper function สำหรับ update transcode field อย่างปลอดภัย
 async function safeUpdateTranscode(storageId, key, value) {
@@ -2485,7 +2497,7 @@ router.post('/recording/finalize', async (req, res) => {
       }
     }
     
-    
+
     try {
       // Use enhanced merge function that handles MP4/WebM format issues
       const mergeResult = await mergeVideoChunksWithFormat(sessionId, sessionData);
