@@ -2727,25 +2727,23 @@ router.post('/recording/finalize', async (req, res) => {
           if (storageId) {
             console.log(`🔄 Updating storage ${storageId} with complete metadata...`);
             
-            // อัปเดต transcode field
-            await safeUpdateTranscode(storageId, 'media_recording', finalVideoUrl);
-            console.log(`✅ Transcode field updated`);
-            
-            // อัปเดตฟิลด์ครบถ้วน
+            // อัปเดตทุกฟิลด์รวมถึง transcode ในครั้งเดียว
             const updateData = {
               path: finalVideoUrl,
               size: videoMetadata.size,
               duration: videoMetadata.duration,
               thumbnail: thumbnailData.base64,
-              thumbnailUrl: thumbnailUrl
+              thumbnailUrl: thumbnailUrl,
+              'transcode.media_recording': finalVideoUrl
             };
             
-            console.log(`🔍 Update data being sent:`, {
+            console.log(`🔍 Complete update data being sent:`, {
               path: finalVideoUrl,
               size: videoMetadata.size,
               duration: videoMetadata.duration,
               thumbnailLength: thumbnailData.base64 ? thumbnailData.base64.length : 0,
-              thumbnailUrl: thumbnailUrl
+              thumbnailUrl: thumbnailUrl,
+              transcodeField: finalVideoUrl
             });
             
             const pathUpdateResult = await Storage.findOneAndUpdate(
@@ -2753,6 +2751,8 @@ router.post('/recording/finalize', async (req, res) => {
               { $set: updateData },
               { new: true }
             );
+            
+            console.log(`📄 Final updated document:`, pathUpdateResult);
             
             if (pathUpdateResult) {
               console.log(`✅ Storage updated with complete metadata:`);
