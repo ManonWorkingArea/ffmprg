@@ -2711,7 +2711,7 @@ router.post('/recording/finalize', async (req, res) => {
           
           console.log(`✅ S3 upload successful: ${finalVideoUrl}`);
           
-          // Upload thumbnail to S3
+          // Upload thumbnail to S3 และรอให้เสร็จก่อน
           console.log(`🖼️  Uploading thumbnail to S3...`);
           const thumbnailFileName = `${sessionId}_thumbnail.png`;
           try {
@@ -2719,13 +2719,19 @@ router.post('/recording/finalize', async (req, res) => {
             console.log(`✅ Thumbnail upload successful: ${thumbnailUrl}`);
           } catch (thumbnailError) {
             console.error(`❌ Thumbnail upload failed: ${thumbnailError.message}`);
+            console.error(`❌ Thumbnail error details:`, thumbnailError);
             thumbnailUrl = null; // Set to null if upload fails
           }
           
-          // อัปเดต storage collection
+          // รอสักครู่เพื่อให้แน่ใจว่า S3 operation เสร็จสิ้น
+          console.log(`⏳ Waiting for S3 operations to complete...`);
+          await new Promise(resolve => setTimeout(resolve, 1000)); // รอ 1 วินาที
+          
+          // อัปเดต storage collection หลังจาก thumbnail upload เสร็จแล้ว
           const storageId = sessionData.storage || sessionData.fileId;
           if (storageId) {
             console.log(`🔄 Updating storage ${storageId} with complete metadata...`);
+            console.log(`🖼️  Final thumbnailUrl for storage:`, thumbnailUrl);
             
             // อัปเดตทุกฟิลด์รวมถึง transcode ในครั้งเดียว
             const updateData = {
