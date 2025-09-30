@@ -110,27 +110,49 @@ async function getVideoMetadata(videoPath) {
  * @returns {string} - URL of uploaded thumbnail
  */
 async function uploadThumbnailToS3(spaceData, thumbnailBuffer, filename) {
-  const s3Client = new S3({
-    endpoint: `${spaceData.s3EndpointDefault}`,
-    region: `${spaceData.s3Region}`,
-    ResponseContentEncoding: "utf-8",
-    credentials: {
-      accessKeyId: spaceData.s3Key,
-      secretAccessKey: spaceData.s3Secret
-    },
-    forcePathStyle: false
-  });
+  try {
+    console.log(`🔍 Thumbnail upload config:`, {
+      endpoint: spaceData.s3EndpointDefault,
+      region: spaceData.s3Region,
+      bucket: spaceData.s3Bucket,
+      filename: filename,
+      bufferSize: thumbnailBuffer.length
+    });
 
-  const uploadParams = {
-    Bucket: `${spaceData.s3Bucket}`,
-    Key: `thumbnails/${filename}`,
-    Body: thumbnailBuffer,
-    ContentType: 'image/png',
-    ACL: 'public-read'
-  };
+    const s3Client = new S3({
+      endpoint: `${spaceData.s3EndpointDefault}`,
+      region: `${spaceData.s3Region}`,
+      ResponseContentEncoding: "utf-8",
+      credentials: {
+        accessKeyId: spaceData.s3Key,
+        secretAccessKey: spaceData.s3Secret
+      },
+      forcePathStyle: false
+    });
 
-  await s3Client.putObject(uploadParams);
-  return `${spaceData.s3Endpoint}thumbnails/${filename}`;
+    const uploadParams = {
+      Bucket: `${spaceData.s3Bucket}`,
+      Key: `thumbnails/${filename}`,
+      Body: thumbnailBuffer,
+      ContentType: 'image/png',
+      ACL: 'public-read'
+    };
+
+    console.log(`🚀 Uploading thumbnail with params:`, {
+      Bucket: uploadParams.Bucket,
+      Key: uploadParams.Key,
+      ContentType: uploadParams.ContentType,
+      BodySize: uploadParams.Body.length
+    });
+
+    await s3Client.putObject(uploadParams);
+    const thumbnailUrl = `${spaceData.s3Endpoint}thumbnails/${filename}`;
+    console.log(`✅ Thumbnail uploaded successfully to: ${thumbnailUrl}`);
+    return thumbnailUrl;
+  } catch (error) {
+    console.error(`❌ Thumbnail S3 upload error:`, error);
+    throw new Error(`Failed to upload thumbnail: ${error.message}`);
+  }
 }
 
 // Base directories for media recording storage - use absolute path to ensure consistency
@@ -2692,8 +2714,13 @@ router.post('/recording/finalize', async (req, res) => {
           // Upload thumbnail to S3
           console.log(`🖼️  Uploading thumbnail to S3...`);
           const thumbnailFileName = `${sessionId}_thumbnail.png`;
-          thumbnailUrl = await uploadThumbnailToS3(sessionData.space, thumbnailData.buffer, thumbnailFileName);
-          console.log(`✅ Thumbnail upload successful: ${thumbnailUrl}`);
+          try {
+            thumbnailUrl = await uploadThumbnailToS3(sessionData.space, thumbnailData.buffer, thumbnailFileName);
+            console.log(`✅ Thumbnail upload successful: ${thumbnailUrl}`);
+          } catch (thumbnailError) {
+            console.error(`❌ Thumbnail upload failed: ${thumbnailError.message}`);
+            thumbnailUrl = null; // Set to null if upload fails
+          }
           
           // อัปเดต storage collection
           const storageId = sessionData.storage || sessionData.fileId;
@@ -2712,6 +2739,14 @@ router.post('/recording/finalize', async (req, res) => {
               thumbnail: thumbnailData.base64,
               thumbnailUrl: thumbnailUrl
             };
+            
+            console.log(`🔍 Update data being sent:`, {
+              path: finalVideoUrl,
+              size: videoMetadata.size,
+              duration: videoMetadata.duration,
+              thumbnailLength: thumbnailData.base64 ? thumbnailData.base64.length : 0,
+              thumbnailUrl: thumbnailUrl
+            });
             
             const pathUpdateResult = await Storage.findOneAndUpdate(
               { _id: new mongoose.Types.ObjectId(storageId) },
