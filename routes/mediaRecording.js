@@ -8,7 +8,6 @@ const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
 const { S3 } = require('@aws-sdk/client-s3');
 const mongoose = require('mongoose');
-const sharp = require('sharp');
 const { getHostnameData, getSpaceData } = require('../middleware/hostname');
 
 // Configure multer for chunk uploads with increased limits for 4K@60fps video
