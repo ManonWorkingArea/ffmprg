@@ -18,6 +18,8 @@ const spaceSchema = new mongoose.Schema({
   s3EndpointDefault: String,
   s3Hosting: String,
   s3Region: String,
+  s3Key: String,        // S3 Access Key
+  s3Secret: String,     // S3 Secret Key
   status: Boolean,
   spaceSize: String,
   count: Number,
