@@ -114,31 +114,41 @@ console.log('📦 Storage model initialized for media recording');
 
 // Helper function สำหรับ update transcode field อย่างปลอดภัย
 async function safeUpdateTranscode(storageId, key, value) {
-  if (!storageId) return;
+  if (!storageId) {
+    console.log(`⚠️  No storageId provided to safeUpdateTranscode`);
+    return;
+  }
+  
+  console.log(`🔄 safeUpdateTranscode: ${storageId}, ${key}, ${value}`);
   
   try {
     const storageDoc = await Storage.findById(new mongoose.Types.ObjectId(storageId));
     if (!storageDoc) {
-      console.error(`Storage document not found: ${storageId}`);
+      console.error(`❌ Storage document not found: ${storageId}`);
       return;
     }
     
+    console.log(`📄 Found storage document, current transcode:`, storageDoc.transcode);
+    
     if (storageDoc.transcode === null || storageDoc.transcode === undefined) {
-      await Storage.findOneAndUpdate(
+      const result = await Storage.findOneAndUpdate(
         { _id: new mongoose.Types.ObjectId(storageId) },
         { $set: { transcode: { [key]: value } } },
         { new: true }
       ).exec();
-      console.log(`Created transcode field for storage ${storageId} with ${key}: ${value}`);
+      console.log(`✅ Created transcode field for storage ${storageId} with ${key}: ${value}`);
+      console.log(`📄 Updated document:`, result);
     } else {
-      await Storage.findOneAndUpdate(
+      const result = await Storage.findOneAndUpdate(
         { _id: new mongoose.Types.ObjectId(storageId) },
         { $set: { [`transcode.${key}`]: value } },
         { new: true }
       ).exec();
+      console.log(`✅ Updated transcode.${key} for storage ${storageId}: ${value}`);
+      console.log(`📄 Updated document:`, result);
     }
   } catch (error) {
-    console.error(`Error updating transcode for storage ${storageId}:`, error);
+    console.error(`❌ Error updating transcode for storage ${storageId}:`, error);
   }
 }
 
@@ -2544,16 +2554,26 @@ router.post('/recording/finalize', async (req, res) => {
           
           // อัปเดต storage collection
           if (sessionData.storage) {
+            console.log(`🔄 Updating storage ${sessionData.storage} with URL: ${finalVideoUrl}`);
+            
+            // อัปเดต transcode field
             await safeUpdateTranscode(sessionData.storage, 'media_recording', finalVideoUrl);
+            console.log(`✅ Transcode field updated`);
             
             // อัปเดตฟิลด์ path ด้วย final URL
-            await Storage.findOneAndUpdate(
+            const pathUpdateResult = await Storage.findOneAndUpdate(
               { _id: new mongoose.Types.ObjectId(sessionData.storage) },
               { $set: { path: finalVideoUrl } },
               { new: true }
             );
             
-            console.log(`✅ Storage updated with final URL: ${finalVideoUrl}`);
+            if (pathUpdateResult) {
+              console.log(`✅ Storage path updated successfully: ${finalVideoUrl}`);
+            } else {
+              console.error(`❌ Failed to update storage path for ID: ${sessionData.storage}`);
+            }
+          } else {
+            console.log(`⚠️  No storage ID found in session data`);
           }
           
         } catch (s3Error) {
