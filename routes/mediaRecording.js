@@ -22,6 +22,7 @@ const upload = multer({
   }
 });
 
+
 /**
  * Generate thumbnail from video file
  * @param {string} videoPath - Path to the video file
