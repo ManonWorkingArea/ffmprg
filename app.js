@@ -109,16 +109,7 @@ app.use(express.urlencoded({ limit: '100mb', extended: true }));
 app.use(express.static('public'));
 app.use(express.static('outputs'));
 
-// Import and use media recording routes
-const mediaRecordingRoutes = require('./routes/mediaRecording');
-const { requestLogger, performanceMonitor } = require('./middleware/mediaRecording');
-
-// Apply media recording middleware and routes
-console.log('📡 Registering media recording routes at /api/media');
-app.use('/api/media', requestLogger);
-app.use('/api/media', performanceMonitor);
-app.use('/api/media', mediaRecordingRoutes);
-console.log('✅ Media recording routes registered successfully');
+// Media recording routes จะถูกโหลดหลังจาก Storage model ถูกสร้างแล้ว
 
 // CORS test endpoint
 app.get('/api/cors-test', (req, res) => {
@@ -218,8 +209,26 @@ const storageSchema = new mongoose.Schema({
   transcode: { type: Object, default: {} } // เพิ่มฟิลด์ transcode
 });
 
-// สร้างโมเดล Storage
-const Storage = mongoose.model('storage', storageSchema, 'storage'); // Specify collection name as 'hostname'
+// สร้างโมเดล Storage (ตรวจสอบก่อนสร้างเพื่อป้องกัน duplication)
+let Storage;
+if (mongoose.models.storage) {
+  Storage = mongoose.models.storage;
+  console.log('📦 Using existing Storage model (already created by routes)');
+} else {
+  Storage = mongoose.model('storage', storageSchema, 'storage');
+  console.log('📦 Created new Storage model in app.js');
+}
+
+// ตอนนี้ Storage model ถูกสร้างแล้ว จึงสามารถโหลด media recording routes ได้
+const mediaRecordingRoutes = require('./routes/mediaRecording');
+const { requestLogger, performanceMonitor } = require('./middleware/mediaRecording');
+
+// Apply media recording middleware and routes
+console.log('📡 Registering media recording routes at /api/media');
+app.use('/api/media', requestLogger);
+app.use('/api/media', performanceMonitor);
+app.use('/api/media', mediaRecordingRoutes);
+console.log('✅ Media recording routes registered successfully');
 
 let ffmpegProcesses = {}; // เก็บข้อมูลเกี่ยวกับกระบวนการ ffmpeg
 let isProcessing = false; // ตัวแปรเพื่อบอกสถานะการประมวลผล
