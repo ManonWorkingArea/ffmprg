@@ -6,6 +6,9 @@ const fs = require('fs').promises;
 const fsSync = require('fs'); // For streams
 const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
+const { S3 } = require('@aws-sdk/client-s3');
+const mongoose = require('mongoose');
+const { getHostnameData, getSpaceData } = require('../middleware/hostname');
 
 // Configure multer for chunk uploads with increased limits for 4K@60fps video
 const upload = multer({ 
@@ -76,6 +79,56 @@ const initializeDirectories = async () => {
 // Global session store for active sessions
 const activeSessions = new Map();
 let directoryInitialized = false;
+
+// Storage schema สำหรับอัปเดตสถานะ transcode
+const storageSchema = new mongoose.Schema({
+  owner: { type: String, required: true },
+  original: { type: String, required: true },
+  path: { type: String, required: true },
+  parent: { type: String, default: '' },
+  name: { type: String, required: true },
+  size: { type: Number, required: true },
+  type: { type: String, required: true },
+  mimetype: { type: String, required: true },
+  spaceId: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now },
+  duration: { type: Number, default: 0 },
+  thumbnail: { type: String, default: '' },
+  transcode: { type: Object, default: {} }
+});
+
+const Storage = mongoose.model('storage', storageSchema, 'storage');
+
+// Helper function สำหรับ update transcode field อย่างปลอดภัย
+async function safeUpdateTranscode(storageId, key, value) {
+  if (!storageId) return;
+  
+  try {
+    const storageDoc = await Storage.findById(new mongoose.Types.ObjectId(storageId));
+    if (!storageDoc) {
+      console.error(`Storage document not found: ${storageId}`);
+      return;
+    }
+    
+    if (storageDoc.transcode === null || storageDoc.transcode === undefined) {
+      await Storage.findOneAndUpdate(
+        { _id: new mongoose.Types.ObjectId(storageId) },
+        { $set: { transcode: { [key]: value } } },
+        { new: true }
+      ).exec();
+      console.log(`Created transcode field for storage ${storageId} with ${key}: ${value}`);
+    } else {
+      await Storage.findOneAndUpdate(
+        { _id: new mongoose.Types.ObjectId(storageId) },
+        { $set: { [`transcode.${key}`]: value } },
+        { new: true }
+      ).exec();
+    }
+  } catch (error) {
+    console.error(`Error updating transcode for storage ${storageId}:`, error);
+  }
+}
 
 /**
  * Initialize directories when the module is first loaded
@@ -2028,7 +2081,9 @@ router.post('/recording/init', async (req, res) => {
       metadata = {},
       expectedDuration,
       expectedChunks,
-      videoSettings = {}
+      videoSettings = {},
+      site,
+      storage // ID ของไฟล์ใน storage collection
     } = req.body;
     
     console.log(`🆕 Creating session: ${sessionId}`);
@@ -2043,6 +2098,29 @@ router.post('/recording/init', async (req, res) => {
         message: 'Session already initialized',
         session: activeSessions.get(sessionId)
       });
+    }
+    
+    // Fetch hostname and space data (ถ้ามี site)
+    let hostnameData = null;
+    let spaceData = null;
+    
+    if (site) {
+      try {
+        hostnameData = await getHostnameData(site);
+        console.log('Fetched hostname data:', hostnameData);
+        if (!hostnameData) {
+          return res.status(404).json({ success: false, error: 'Hostname not found' });
+        }
+        
+        spaceData = await getSpaceData(hostnameData.spaceId);
+        console.log('Fetched space data:', spaceData);
+        if (!spaceData) {
+          return res.status(404).json({ success: false, error: 'Space not found' });
+        }
+      } catch (error) {
+        console.error('Failed to fetch hostname/space data:', error);
+        return res.status(500).json({ success: false, error: 'Failed to fetch configuration data' });
+      }
     }
     
     // Create session directories
@@ -2082,6 +2160,10 @@ router.post('/recording/init', async (req, res) => {
         quality: 'medium',
         ...videoSettings
       },
+      // เพิ่มข้อมูลสำหรับ MongoDB และ S3 integration
+      site: hostnameData,
+      space: spaceData,
+      storage: storage, // ID ของไฟล์ใน storage collection
       chunks: [],
       totalChunks: 0,
       totalSize: 0,
@@ -2123,7 +2205,10 @@ router.post('/recording/init', async (req, res) => {
         createdAt: sessionData.createdAt,
         expectedChunks: sessionData.expectedChunks,
         expectedDuration: sessionData.expectedDuration,
-        videoSettings: sessionData.videoSettings
+        videoSettings: sessionData.videoSettings,
+        site: hostnameData,
+        space: spaceData,
+        storage: storage
       },
       endpoints: {
         uploadChunk: `/recording/chunk`,
@@ -2390,6 +2475,16 @@ router.post('/recording/finalize', async (req, res) => {
     
     console.log(`🔀 Starting video merge for ${sessionData.chunks.length} chunks...`);
     
+    // อัปเดตสถานะใน storage (ถ้ามี)
+    if (sessionData.storage) {
+      try {
+        await safeUpdateTranscode(sessionData.storage, 'media_recording', 'processing...');
+        console.log(`Updated storage ${sessionData.storage} with processing status`);
+      } catch (storageError) {
+        console.warn(`Failed to update storage ${sessionData.storage}:`, storageError.message);
+      }
+    }
+    
     try {
       // Use enhanced merge function that handles MP4/WebM format issues
       const mergeResult = await mergeVideoChunksWithFormat(sessionId, sessionData);
@@ -2398,10 +2493,65 @@ router.post('/recording/finalize', async (req, res) => {
       console.log(`📊 Final video: ${mergeResult.sizeMB}MB, ${mergeResult.actualDuration.toFixed(2)}s`);
       console.log(`⏱️  Expected vs Actual duration: ${mergeResult.expectedDuration.toFixed(2)}s vs ${mergeResult.actualDuration.toFixed(2)}s`);
       
+      let finalVideoUrl = null;
+      
+      // อัปโหลดไป S3 (ถ้ามี space data)
+      if (sessionData.space && sessionData.space.s3Bucket) {
+        try {
+          console.log(`🚀 Uploading final video to S3...`);
+          
+          // ตั้งค่า S3 client
+          const s3Client = new S3({
+            endpoint: `${sessionData.space.s3EndpointDefault}`,
+            region: `${sessionData.space.s3Region}`,
+            ResponseContentEncoding: "utf-8",
+            credentials: {
+              accessKeyId: sessionData.space.s3Key,
+              secretAccessKey: sessionData.space.s3Secret
+            },
+            forcePathStyle: false
+          });
+          
+          // อ่านไฟล์และอัปโหลด
+          const fileContent = await fs.readFile(mergeResult.outputPath);
+          const outputFileName = `${sessionId}_final.mp4`;
+          
+          const uploadParams = {
+            Bucket: `${sessionData.space.s3Bucket}`,
+            Key: `media-recordings/${outputFileName}`,
+            Body: fileContent,
+            ContentType: 'video/mp4',
+            ACL: 'public-read'
+          };
+          
+          await s3Client.putObject(uploadParams);
+          finalVideoUrl = `${sessionData.space.s3Endpoint}media-recordings/${outputFileName}`;
+          
+          console.log(`✅ S3 upload successful: ${finalVideoUrl}`);
+          
+          // อัปเดต storage collection
+          if (sessionData.storage) {
+            await safeUpdateTranscode(sessionData.storage, 'media_recording', finalVideoUrl);
+            console.log(`✅ Storage updated with final URL: ${finalVideoUrl}`);
+          }
+          
+        } catch (s3Error) {
+          console.error(`❌ S3 upload failed: ${s3Error.message}`);
+          
+          // อัปเดต storage ด้วย error status
+          if (sessionData.storage) {
+            await safeUpdateTranscode(sessionData.storage, 'media_recording', 'upload_error');
+          }
+        }
+      } else {
+        console.log(`⚠️  No S3 configuration found, video saved locally only`);
+      }
+      
       // Update session data
       sessionData.status = 'completed';
       sessionData.finalizedAt = new Date().toISOString();
       sessionData.mergeResult = mergeResult;
+      sessionData.finalVideoUrl = finalVideoUrl;
       activeSessions.set(sessionId, sessionData);
       
       // Optionally cleanup chunks after successful merge
@@ -2418,13 +2568,29 @@ router.post('/recording/finalize', async (req, res) => {
           expectedDuration: mergeResult.expectedDuration,
           actualDuration: mergeResult.actualDuration,
           durationAccuracy: Math.abs(mergeResult.actualDuration - mergeResult.expectedDuration) < 2 ? 'good' : 'poor',
-          chunksProcessed: mergeResult.chunksProcessed
+          chunksProcessed: mergeResult.chunksProcessed,
+          localPath: mergeResult.outputPath,
+          s3Url: finalVideoUrl, // URL ของไฟล์ใน S3
+          uploaded: !!finalVideoUrl // boolean บอกว่าอัปโหลดสำเร็จหรือไม่
         },
+        storage: sessionData.storage ? {
+          id: sessionData.storage,
+          updated: !!finalVideoUrl
+        } : null,
         cleanup: cleanup
       });
       
     } catch (mergeError) {
       console.error(`❌ Video merge failed: ${mergeError.message}`);
+      
+      // อัปเดต storage ด้วย error status
+      if (sessionData.storage) {
+        try {
+          await safeUpdateTranscode(sessionData.storage, 'media_recording', 'merge_error');
+        } catch (storageError) {
+          console.error(`Failed to update storage with error status:`, storageError.message);
+        }
+      }
       
       res.status(500).json({
         success: false,
@@ -2653,8 +2819,60 @@ router.post('/recording/finalize-async', async (req, res) => {
         directories: { sessionDir, chunksDir }
       };
       
+      // อัปเดตสถานะใน storage ขณะเริ่ม merge
+      if (sessionData.storage) {
+        await safeUpdateTranscode(sessionData.storage, 'media_recording', 'processing...');
+      }
+      
       // Merge video
       const mergeResult = await mergeVideoChunksWithFormat(sessionId, sessionData);
+      
+      let finalVideoUrl = null;
+      
+      // อัปโหลดไป S3 (ถ้ามี space data)
+      if (sessionData.space && sessionData.space.s3Bucket) {
+        try {
+          console.log(`🚀 Background job ${jobId}: Uploading to S3...`);
+          
+          const s3Client = new S3({
+            endpoint: `${sessionData.space.s3EndpointDefault}`,
+            region: `${sessionData.space.s3Region}`,
+            ResponseContentEncoding: "utf-8",
+            credentials: {
+              accessKeyId: sessionData.space.s3Key,
+              secretAccessKey: sessionData.space.s3Secret
+            },
+            forcePathStyle: false
+          });
+          
+          const fileContent = await fs.readFile(mergeResult.outputPath);
+          const outputFileName = `${sessionId}_final.mp4`;
+          
+          const uploadParams = {
+            Bucket: `${sessionData.space.s3Bucket}`,
+            Key: `media-recordings/${outputFileName}`,
+            Body: fileContent,
+            ContentType: 'video/mp4',
+            ACL: 'public-read'
+          };
+          
+          await s3Client.putObject(uploadParams);
+          finalVideoUrl = `${sessionData.space.s3Endpoint}media-recordings/${outputFileName}`;
+          
+          console.log(`✅ Background job ${jobId}: S3 upload successful`);
+          
+          // อัปเดต storage collection
+          if (sessionData.storage) {
+            await safeUpdateTranscode(sessionData.storage, 'media_recording', finalVideoUrl);
+          }
+          
+        } catch (s3Error) {
+          console.error(`❌ Background job ${jobId}: S3 upload failed:`, s3Error.message);
+          if (sessionData.storage) {
+            await safeUpdateTranscode(sessionData.storage, 'media_recording', 'upload_error');
+          }
+        }
+      }
       
       console.log(`✅ Job ${jobId} completed successfully`);
       
@@ -2663,12 +2881,29 @@ router.post('/recording/finalize-async', async (req, res) => {
       global.finalizationJobs.set(jobId, {
         status: 'completed',
         sessionId,
-        result: mergeResult,
+        result: {
+          ...mergeResult,
+          s3Url: finalVideoUrl,
+          uploaded: !!finalVideoUrl
+        },
+        storage: sessionData.storage ? {
+          id: sessionData.storage,
+          updated: !!finalVideoUrl
+        } : null,
         completedAt: new Date().toISOString()
       });
       
     } catch (error) {
       console.error(`❌ Job ${jobId} failed: ${error.message}`);
+      
+      // อัปเดต storage ด้วย error status
+      if (sessionData && sessionData.storage) {
+        try {
+          await safeUpdateTranscode(sessionData.storage, 'media_recording', 'job_error');
+        } catch (storageError) {
+          console.error(`Failed to update storage with job error:`, storageError.message);
+        }
+      }
       
       // Store error result
       global.finalizationJobs = global.finalizationJobs || new Map();
@@ -2676,6 +2911,10 @@ router.post('/recording/finalize-async', async (req, res) => {
         status: 'failed',
         sessionId,
         error: error.message,
+        storage: sessionData && sessionData.storage ? {
+          id: sessionData.storage,
+          updated: false
+        } : null,
         completedAt: new Date().toISOString()
       });
     }
