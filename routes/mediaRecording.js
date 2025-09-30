@@ -2105,7 +2105,8 @@ router.post('/recording/init', async (req, res) => {
       expectedChunks,
       videoSettings = {},
       site,
-      storage // ID ของไฟล์ใน storage collection
+      storage, // ID ของไฟล์ใน storage collection
+      fileId   // Alternative storage ID
     } = req.body;
     
     console.log(`🆕 Creating session: ${sessionId}`);
@@ -2185,7 +2186,7 @@ router.post('/recording/init', async (req, res) => {
       // เพิ่มข้อมูลสำหรับ MongoDB และ S3 integration
       site: hostnameData,
       space: spaceData,
-      storage: storage, // ID ของไฟล์ใน storage collection
+      storage: storage || fileId, // ID ของไฟล์ใน storage collection
       chunks: [],
       totalChunks: 0,
       totalSize: 0,
