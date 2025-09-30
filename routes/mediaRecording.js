@@ -2545,6 +2545,14 @@ router.post('/recording/finalize', async (req, res) => {
           // อัปเดต storage collection
           if (sessionData.storage) {
             await safeUpdateTranscode(sessionData.storage, 'media_recording', finalVideoUrl);
+            
+            // อัปเดตฟิลด์ path ด้วย final URL
+            await Storage.findOneAndUpdate(
+              { _id: new mongoose.Types.ObjectId(sessionData.storage) },
+              { $set: { path: finalVideoUrl } },
+              { new: true }
+            );
+            
             console.log(`✅ Storage updated with final URL: ${finalVideoUrl}`);
           }
           
